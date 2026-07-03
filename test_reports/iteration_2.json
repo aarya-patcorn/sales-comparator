@@ -1,0 +1,39 @@
+{
+  "summary": "Iteration 2 — Tested new AI sales pitch feature (POST /api/pitch + comparison.tsx). Backend: 7/7 pitch tests pass (single competitor, multiple competitors, custom products, caching, invalid code 404, lines cite digits, /api/compare regression). Frontend: deep-linked to /comparison?code=K90&ids=... with seeded session, both pitch-toggle-0 and pitch-toggle-1 render, AI badge + Sales Pitch title visible, first card auto-expanded with 3 numbered lines, tapping toggle-1 collapses 0 and expands 1, Detailed Specifications table renders below. Real GPT-5.2 content with specific numerical comparisons (e.g. '4–5 hours pot life vs 3–4 hours—up to 25% more working time').",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/pitch", "issue": "Backend logs show occasional 'Budget has been exceeded! Current cost: 0.003227, Max budget: 0.001' from LiteLLM for some pitch generations. Endpoint still returns 200 because of deterministic fallback inside try/except. Fallback path does NOT cache, so a budget-exhausted competitor will hit the LLM (and fail) on every request. Consider (a) caching fallback too, OR (b) returning a clear 503/flag when LLM fails so UI can show retry. Currently invisible to user but inefficient."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "_layout (carryover from iter1)", "issues": ["Console warnings still present: 'No route named auth-callback exists' and 'props.pointerEvents is deprecated'. Non-blocking."]}
+    ],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_pitch.py",
+    "/app/backend/tests/test_kamdhenu_api.py",
+    "/app/test_reports/pytest/pitch_results.xml"
+  ],
+  "action_items": [
+    "(Optional) Cache the deterministic fallback pitch in db.pitch_cache so a budget-exceeded LLM call doesn't repeat on every request.",
+    "(Optional) Surface LLM failures to UI (e.g. small 'fallback pitch — retry for AI' note) instead of silently using fallback.",
+    "(Carryover) Clean up auth-callback Stack.Screen registration and migrate deprecated pointerEvents prop."
+  ],
+  "critical_code_review_comments": [
+    "comparison.tsx useEffect has empty dependency [] but uses code/ids/custom from useLocalSearchParams — fine for this single-mount flow but would break if the screen ever re-uses params via router.replace.",
+    "/api/pitch fallback branch returns 200 with non-AI content; consider adding a 'source: ai|fallback' field in the response so frontend can distinguish.",
+    "Pitch cache key uses md5(kamdhenu_code|brand|name|is_type|en_type|v2). It does NOT include the actual params, so if seed data param values change, stale cached pitches will be served. Consider hashing the param dicts too."
+  ],
+  "updated_files": ["/app/backend/tests/test_pitch.py (new)"],
+  "success_rate": {"backend": "100% (7/7 new + 15/16 prior)", "frontend": "100% on tested flows (deep-linked comparison)"},
+  "seed_data_creation": "None. Used dev_session_kamdhenu_2026 (auto-seeded). Pitch cache populated organically (6 entries verified in db.pitch_cache).",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "To test comparison screen quickly, set localStorage.session_token='dev_session_kamdhenu_2026' then navigate to /comparison?code=K90&ids=[\"myk_laticrete::6\",\"mapei::8\"]&custom=[]. Mongo db.pitch_cache stores cached pitches keyed by hash; clear with db.pitch_cache.deleteMany({}) to force re-generation. LLM key budget can throw 'Budget has been exceeded' — fallback pitches are deterministic strings about open time/coverage/standards.",
+  "rca_of_issue": "No bugs. Feature works end-to-end. Only observed concern is the LLM budget intermittent error captured in backend.err.log (handled gracefully via fallback)."
+}
