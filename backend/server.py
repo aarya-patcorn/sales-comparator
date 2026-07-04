@@ -3,7 +3,8 @@ import asyncio
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from starlette.responses import RedirectResponse
-from motor.motor_asyncio import AsyncIOMotorClfrom openai import OpenAI
+from motor.motor_asyncio import AsyncIOMotorClient
+from openai import OpenAI
 import os
 import logging
 import uuid
@@ -922,25 +923,6 @@ COMPETITOR PRODUCTS BEING COMPARED:
             prompt,
             "You are a senior technical writer for Kamdhenu Adhesives. Write professional, factual, B2B-grade technical recommendations.",
         )
-after Water: {kam['params'].get('Tensile Adhesion after Water Immersion','-')}
-  - Tensile after Heat: {kam['params'].get('Tensile Adhesion after Heat Aging','-')}
-  - Tensile after Freeze-Thaw: {kam['params'].get('Tensile Adhesion after Freeze-Thaw','-')}
-  - Slip Resistance: {kam['params'].get('Slip Resistance','-')}
-  - Coverage: {kam['params'].get('Coverage','-')}
-  - VOC: {kam['params'].get('VOC Content','-')}
-
-COMPETITOR PRODUCTS BEING COMPARED:
-{comp_lines}
-{ctx_str}
-"""
-    try:
-        chat = LlmChat(
-            api_key=api_key,
-            session_id=f"rec-{cache_key}",
-            system_message="You are a senior technical writer for Kamdhenu Adhesives. Write professional, factual, B2B-grade technical recommendations.",
-        ).with_model("openai", "gpt-5.2")
-        response = await chat.send_message(UserMessage(text=prompt))
-        text = (response or "").strip()
         if not text:
             raise ValueError("Empty response")
         await db.recommendation_cache.update_one(
