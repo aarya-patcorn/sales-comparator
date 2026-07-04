@@ -3,7 +3,7 @@ import asyncio
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from starlette.responses import RedirectResponse
-from motor.motor_asyncio import AsyncIOMotorClient
+from motor.motor_asyncio import AsyncIOMotorClfrom openai import OpenAI
 import os
 import logging
 import uuid
@@ -33,7 +33,6 @@ from competitor_tds import (
     stop_scheduler as stop_competitor_tds_scheduler,
 )
 import hashlib
-from emergentintegrations.llm.chat import LlmChat, UserMessage
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -43,6 +42,30 @@ client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 BACKEND_HOST = os.environ.get("BACKEND_HOST", "0.0.0.0")
 BACKEND_PORT = int(os.environ.get("BACKEND_PORT", "8000"))
+OPENAI_MODEL = "gpt-4.1-mini"
+_openai_client: Optional[OpenAI] = None
+
+
+def _get_openai_client() -> OpenAI:
+    global _openai_client
+    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        raise HTTPException(status_code=500, detail="OPENAI_API_KEY not configured")
+    if _openai_client is None:
+        _openai_client = OpenAI(api_key=api_key)
+    return _openai_client
+
+
+async def _generate_openai_text(prompt: str, system_message: str) -> str:
+    def _run() -> str:
+        response = _get_openai_client().responses.create(
+            model=OPENAI_MODEL,
+            instructions=system_message,
+            input=prompt,
+        )
+        return (response.output_text or "").strip()
+
+    return await asyncio.to_thread(_run)
 
 
 def _parse_cors_origins() -> List[str]:
@@ -686,9 +709,7 @@ async def generate_pitch(req: PitchRequest):
     if not kam:
         raise HTTPException(status_code=404, detail="Kamdhenu product not found")
 
-    api_key = os.environ.get("EMERGENT_LLM_KEY")
-    if not api_key:
-        raise HTTPException(status_code=500, detail="LLM key not configured")
+    _get_openai_client()
 
     pitches: List[Dict[str, Any]] = []
 
@@ -761,14 +782,10 @@ Technical Specs:
 """
 
         try:
-            chat = LlmChat(
-                api_key=api_key,
-                session_id=f"pitch-{cache_key}",
-                system_message="You are a precise, persuasive B2B sales coach. Output exactly what is asked, nothing more.",
-            ).with_model("openai", "gpt-5.2")
-
-            response = await chat.send_message(UserMessage(text=prompt))
-            text = (response or "").strip()
+            text = await _generate_openai_text(
+                prompt,
+                "You are a precise, persuasive B2B sales coach. Output exactly what is asked, nothing more.",
+            )
             lines = [ln.strip(" -•*\t") for ln in text.split("\n") if ln.strip()]
             # Take first 3 lines
             lines = lines[:3] if len(lines) >= 3 else lines
@@ -841,9 +858,7 @@ async def generate_recommendation_text(req: RecommendationTextRequest):
     if not kam:
         raise HTTPException(status_code=404, detail="Kamdhenu product not found")
 
-    api_key = os.environ.get("EMERGENT_LLM_KEY")
-    if not api_key:
-        raise HTTPException(status_code=500, detail="LLM key not configured")
+    _get_openai_client()
 
     competitors: List[Dict[str, Any]] = []
     for cid in req.competitor_product_ids:
@@ -892,6 +907,22 @@ Key Specs:
   - Pot Life: {kam['params'].get('Pot Life','-')}
   - Initial Tensile Adhesion: {kam['params'].get('Initial Tensile Adhesion (IS)','-')}
   - Tensile after Water: {kam['params'].get('Tensile Adhesion after Water Immersion','-')}
+  - Tensile after Heat: {kam['params'].get('Tensile Adhesion after Heat Aging','-')}
+  - Tensile after Freeze-Thaw: {kam['params'].get('Tensile Adhesion after Freeze-Thaw','-')}
+  - Slip Resistance: {kam['params'].get('Slip Resistance','-')}
+  - Coverage: {kam['params'].get('Coverage','-')}
+  - VOC: {kam['params'].get('VOC Content','-')}
+
+COMPETITOR PRODUCTS BEING COMPARED:
+{comp_lines}
+{ctx_str}
+"""
+    try:
+        text = await _generate_openai_text(
+            prompt,
+            "You are a senior technical writer for Kamdhenu Adhesives. Write professional, factual, B2B-grade technical recommendations.",
+        )
+after Water: {kam['params'].get('Tensile Adhesion after Water Immersion','-')}
   - Tensile after Heat: {kam['params'].get('Tensile Adhesion after Heat Aging','-')}
   - Tensile after Freeze-Thaw: {kam['params'].get('Tensile Adhesion after Freeze-Thaw','-')}
   - Slip Resistance: {kam['params'].get('Slip Resistance','-')}
