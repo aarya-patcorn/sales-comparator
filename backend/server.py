@@ -10,6 +10,9 @@ import logging
 import uuid
 import requests as http_requests
 from pathlib import Path
+import base64
+import json
+import hmac
 from pydantic import BaseModel, Field
 from urllib.parse import urlencode, parse_qs, urlparse, urlunparse
 from typing import List, Optional, Dict, Any
@@ -150,11 +153,16 @@ class CustomProduct(BaseModel):
 
 
 # ----------------- Auth Endpoints -----------------
+GOOGLE_STATE_TTL_SECONDS = int(os.environ.get("GOOGLE_STATE_TTL_SECONDS", "600"))
+
+
 def _get_google_oauth_config() -> Dict[str, str]:
     google_client_id = os.environ.get("GOOGLE_CLIENT_ID", "").strip()
     google_client_secret = os.environ.get("GOOGLE_CLIENT_SECRET", "").strip()
     google_callback_url = os.environ.get("GOOGLE_CALLBACK_URL", "").strip()
     frontend_app_url = os.environ.get("FRONTEND_APP_URL", "").strip().rstrip("/")
+    frontend_native_scheme = os.environ.get("FRONTEND_NATIVE_SCHEME", "com.kamdhenu.comparisontool").strip().rstrip(":/")
+    google_state_secret = os.environ.get("GOOGLE_STATE_SECRET", "").strip() or google_client_secret
 
     if not google_client_id or not google_client_secret or not google_callback_url:
         raise HTTPException(status_code=500, detail="Google OAuth is not configured")
@@ -164,6 +172,8 @@ def _get_google_oauth_config() -> Dict[str, str]:
         "client_secret": google_client_secret,
         "callback_url": google_callback_url,
         "frontend_app_url": frontend_app_url,
+        "frontend_native_scheme": frontend_native_scheme,
+        "state_secret": google_state_secret,
     }
 
 
@@ -172,10 +182,18 @@ def _build_google_redirect_url(base_redirect: str, params: Dict[str, str]) -> st
     return f"{base_redirect}{separator}{urlencode(params)}"
 
 
-def _get_default_frontend_callback(frontend_app_url: str) -> str:
+def _get_default_frontend_callback(config: Dict[str, str]) -> str:
+    frontend_app_url = config["frontend_app_url"]
     if not frontend_app_url:
         return ""
     return f"{frontend_app_url}/oauth/callback"
+
+
+def _get_default_login_redirect(config: Dict[str, str]) -> str:
+    frontend_app_url = config["frontend_app_url"]
+    if not frontend_app_url:
+        return ""
+    return f"{frontend_app_url}/login"
 
 
 def _strip_query_and_fragment(url: str) -> str:
@@ -183,20 +201,26 @@ def _strip_query_and_fragment(url: str) -> str:
     return urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
 
 
-def _derive_google_login_redirect(frontend_redirect: str, frontend_app_url: str) -> str:
+def _is_native_callback_url(url: str, config: Dict[str, str]) -> bool:
+    scheme = urlparse(url).scheme
+    return bool(scheme and scheme == config["frontend_native_scheme"])
+
+
+def _derive_google_login_redirect(frontend_redirect: str, config: Dict[str, str]) -> str:
     stripped = _strip_query_and_fragment(frontend_redirect)
     if stripped.endswith("/oauth/callback"):
         return f"{stripped[:-len('/oauth/callback')]}/login"
+    if stripped.endswith("://oauth/callback"):
+        return f"{stripped[:-len('/oauth/callback')]}/login"
     if stripped.endswith(":/oauth/callback"):
         return f"{stripped[:-len('/oauth/callback')]}/login"
-    if frontend_app_url:
-        return f"{frontend_app_url}/login"
-    return stripped
+    return _get_default_login_redirect(config) or stripped
 
 
 def _get_google_error_message(error_code: str) -> str:
     mapping = {
         "access_denied": "Google sign-in was cancelled before it completed.",
+        "invalid_state": "Google sign-in session expired or became invalid. Please try again.",
         "missing_code": "Google sign-in did not return an authorization code.",
         "google_token_exchange_failed": "Google sign-in could not be completed. Please try again.",
         "google_access_token_missing": "Google sign-in did not return an access token.",
@@ -206,6 +230,52 @@ def _get_google_error_message(error_code: str) -> str:
         "google_oauth_failed": "Google sign-in failed. Please try again.",
     }
     return mapping.get(error_code, "Google sign-in failed. Please try again.")
+
+
+def _build_google_state(config: Dict[str, str], frontend_redirect: str) -> str:
+    issued_at = int(datetime.now(timezone.utc).timestamp())
+    nonce = uuid.uuid4().hex
+    signature_payload = f"{frontend_redirect}|{issued_at}|{nonce}".encode("utf-8")
+    signature = hmac.new(
+        config["state_secret"].encode("utf-8"),
+        signature_payload,
+        hashlib.sha256,
+    ).hexdigest()
+    payload = {
+        "redirect": frontend_redirect,
+        "issued_at": issued_at,
+        "nonce": nonce,
+        "sig": signature,
+    }
+    encoded = base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":")).encode("utf-8")).decode("utf-8")
+    return encoded.rstrip("=")
+
+
+def _decode_google_state(config: Dict[str, str], state: Optional[str]) -> Optional[str]:
+    if not state:
+        return None
+
+    try:
+        padded = state + ("=" * (-len(state) % 4))
+        payload = json.loads(base64.urlsafe_b64decode(padded.encode("utf-8")).decode("utf-8"))
+        frontend_redirect = str(payload["redirect"]).strip()
+        issued_at = int(payload["issued_at"])
+        nonce = str(payload["nonce"]).strip()
+        signature = str(payload["sig"]).strip()
+        expected_signature = hmac.new(
+            config["state_secret"].encode("utf-8"),
+            f"{frontend_redirect}|{issued_at}|{nonce}".encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        if not hmac.compare_digest(signature, expected_signature):
+            raise ValueError("state_signature_mismatch")
+        now_ts = int(datetime.now(timezone.utc).timestamp())
+        if now_ts - issued_at > GOOGLE_STATE_TTL_SECONDS:
+            raise ValueError("state_expired")
+        return frontend_redirect
+    except Exception as exc:
+        logger.warning("Google OAuth state validation failed: %s", exc)
+        return None
 
 
 async def _upsert_user_record(
@@ -262,6 +332,8 @@ async def _complete_google_auth_code(code: str, redirect_uri: str) -> Dict[str, 
         "redirect_uri": redirect_uri,
     }
 
+    logger.info("Google OAuth token exchange started for redirect_uri=%s", redirect_uri)
+
     try:
         token_response = http_requests.post(
             "https://oauth2.googleapis.com/token",
@@ -302,6 +374,7 @@ async def _complete_google_auth_code(code: str, redirect_uri: str) -> Dict[str, 
     expires_in = int(token_data.get("expires_in", 3600))
     expires_at = datetime.now(timezone.utc) + timedelta(seconds=expires_in)
     session_token = await _create_user_session(user["user_id"], expires_at)
+    logger.info("Google OAuth session created for user=%s user_id=%s", email, user["user_id"])
 
     return {
         "session_token": session_token,
@@ -362,11 +435,12 @@ async def auth_session(payload: SessionRequest):
 @api_router.get("/auth/google")
 async def auth_google(redirect: Optional[str] = Query(default=None)):
     config = _get_google_oauth_config()
-    final_redirect = redirect or _get_default_frontend_callback(config["frontend_app_url"])
+    final_redirect = (redirect or _get_default_frontend_callback(config)).strip()
     if not final_redirect:
         raise HTTPException(status_code=400, detail="Missing redirect URL")
 
-    state = urlencode({"redirect": final_redirect})
+    state = _build_google_state(config, final_redirect)
+    logger.info("Google OAuth start redirect=%s callback=%s", final_redirect, config["callback_url"])
     query = urlencode({
         "client_id": config["client_id"],
         "redirect_uri": config["callback_url"],
@@ -387,23 +461,36 @@ async def auth_google_callback(
     error: Optional[str] = Query(default=None),
 ):
     config = _get_google_oauth_config()
-    frontend_redirect = _get_default_frontend_callback(config["frontend_app_url"])
-    if state:
-        try:
-            parsed_state = parse_qs(state)
-            frontend_redirect = parsed_state.get("redirect", [frontend_redirect])[0]
-        except Exception:
-            frontend_redirect = _get_default_frontend_callback(config["frontend_app_url"])
+    frontend_redirect = _decode_google_state(config, state)
+    state_valid = frontend_redirect is not None
+    if not frontend_redirect:
+        frontend_redirect = _get_default_frontend_callback(config)
 
     if not frontend_redirect:
         raise HTTPException(status_code=400, detail="Missing frontend redirect URL")
 
-    login_redirect = _derive_google_login_redirect(frontend_redirect, config["frontend_app_url"])
+    error_redirect = frontend_redirect if _is_native_callback_url(frontend_redirect, config) else _derive_google_login_redirect(frontend_redirect, config)
+    logger.info(
+        "Google OAuth callback received state_valid=%s frontend_redirect=%s error=%s has_code=%s",
+        state_valid,
+        frontend_redirect,
+        error,
+        bool(code),
+    )
+
+    if not state_valid:
+        return RedirectResponse(
+            url=_build_google_redirect_url(
+                error_redirect,
+                {"error": _get_google_error_message("invalid_state")},
+            ),
+            status_code=307,
+        )
 
     if error:
         return RedirectResponse(
             url=_build_google_redirect_url(
-                login_redirect,
+                error_redirect,
                 {"error": _get_google_error_message(error)},
             ),
             status_code=307,
@@ -412,7 +499,7 @@ async def auth_google_callback(
     if not code:
         return RedirectResponse(
             url=_build_google_redirect_url(
-                login_redirect,
+                error_redirect,
                 {"error": _get_google_error_message("missing_code")},
             ),
             status_code=307,
@@ -424,13 +511,14 @@ async def auth_google_callback(
         logger.error("Google auth callback failed: %s", exc.detail)
         return RedirectResponse(
             url=_build_google_redirect_url(
-                login_redirect,
+                error_redirect,
                 {"error": _get_google_error_message(str(exc.detail or "google_oauth_failed"))},
             ),
             status_code=307,
         )
 
     redirect_to = _build_google_redirect_url(frontend_redirect, {"token": session["session_token"]})
+    logger.info("Google OAuth success redirecting to %s", redirect_to)
     response = RedirectResponse(url=redirect_to, status_code=307)
     response.set_cookie(
         "session_token",
@@ -1124,4 +1212,6 @@ if __name__ == "__main__":
     import uvicorn
 
     uvicorn.run("server:app", host=BACKEND_HOST, port=BACKEND_PORT, reload=True)
+
+
 
