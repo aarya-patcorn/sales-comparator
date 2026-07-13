@@ -11,7 +11,7 @@ import uuid
 import requests as http_requests
 from pathlib import Path
 from pydantic import BaseModel, Field
-from urllib.parse import urlencode
+from urllib.parse import urlencode, parse_qs, urlparse, urlunparse
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone, timedelta
 
@@ -129,12 +129,6 @@ class SessionRequest(BaseModel):
     session_id: str
 
 
-class GoogleExchangeRequest(BaseModel):
-    code: str
-    redirect_uri: str
-    code_verifier: Optional[str] = None
-
-
 class CompareRequest(BaseModel):
     kamdhenu_code: str
     competitor_product_ids: List[str] = Field(default_factory=list)
@@ -160,7 +154,7 @@ def _get_google_oauth_config() -> Dict[str, str]:
     google_client_id = os.environ.get("GOOGLE_CLIENT_ID", "").strip()
     google_client_secret = os.environ.get("GOOGLE_CLIENT_SECRET", "").strip()
     google_callback_url = os.environ.get("GOOGLE_CALLBACK_URL", "").strip()
-    frontend_redirect_fallback = os.environ.get("FRONTEND_APP_URL", "").strip()
+    frontend_app_url = os.environ.get("FRONTEND_APP_URL", "").strip().rstrip("/")
 
     if not google_client_id or not google_client_secret or not google_callback_url:
         raise HTTPException(status_code=500, detail="Google OAuth is not configured")
@@ -169,13 +163,93 @@ def _get_google_oauth_config() -> Dict[str, str]:
         "client_id": google_client_id,
         "client_secret": google_client_secret,
         "callback_url": google_callback_url,
-        "frontend_redirect_fallback": frontend_redirect_fallback,
+        "frontend_app_url": frontend_app_url,
     }
 
 
 def _build_google_redirect_url(base_redirect: str, params: Dict[str, str]) -> str:
     separator = "&" if "?" in base_redirect else "?"
     return f"{base_redirect}{separator}{urlencode(params)}"
+
+
+def _get_default_frontend_callback(frontend_app_url: str) -> str:
+    if not frontend_app_url:
+        return ""
+    return f"{frontend_app_url}/oauth/callback"
+
+
+def _strip_query_and_fragment(url: str) -> str:
+    parsed = urlparse(url)
+    return urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
+
+
+def _derive_google_login_redirect(frontend_redirect: str, frontend_app_url: str) -> str:
+    stripped = _strip_query_and_fragment(frontend_redirect)
+    if stripped.endswith("/oauth/callback"):
+        return f"{stripped[:-len('/oauth/callback')]}/login"
+    if stripped.endswith(":/oauth/callback"):
+        return f"{stripped[:-len('/oauth/callback')]}/login"
+    if frontend_app_url:
+        return f"{frontend_app_url}/login"
+    return stripped
+
+
+def _get_google_error_message(error_code: str) -> str:
+    mapping = {
+        "access_denied": "Google sign-in was cancelled before it completed.",
+        "missing_code": "Google sign-in did not return an authorization code.",
+        "google_token_exchange_failed": "Google sign-in could not be completed. Please try again.",
+        "google_access_token_missing": "Google sign-in did not return an access token.",
+        "google_profile_lookup_failed": "Could not load your Google profile. Please try again.",
+        "google_email_missing": "Your Google account did not return an email address.",
+        "google_provider_unavailable": "Google sign-in is temporarily unavailable.",
+        "google_oauth_failed": "Google sign-in failed. Please try again.",
+    }
+    return mapping.get(error_code, "Google sign-in failed. Please try again.")
+
+
+async def _upsert_user_record(
+    email: str,
+    name: str,
+    picture: str = "",
+    google_sub: str = "",
+) -> Dict[str, Any]:
+    user = await db.users.find_one({"email": email}, {"_id": 0})
+    if not user:
+        user_id = f"user_{uuid.uuid4().hex[:12]}"
+        user = {
+            "user_id": user_id,
+            "email": email,
+            "name": name,
+            "picture": picture,
+            "created_at": datetime.now(timezone.utc),
+        }
+        if google_sub:
+            user["google_sub"] = google_sub
+        await db.users.insert_one(user.copy())
+        return user
+
+    updates = {"name": name, "picture": picture}
+    if google_sub:
+        updates["google_sub"] = google_sub
+    await db.users.update_one({"user_id": user["user_id"]}, {"$set": updates})
+    user.update(updates)
+    return user
+
+
+async def _create_user_session(user_id: str, expires_at: datetime) -> str:
+    session_token = f"google_session_{uuid.uuid4().hex}"
+    await db.user_sessions.update_one(
+        {"session_token": session_token},
+        {"$set": {
+            "user_id": user_id,
+            "session_token": session_token,
+            "expires_at": expires_at,
+            "created_at": datetime.now(timezone.utc),
+        }},
+        upsert=True,
+    )
+    return session_token
 
 
 async def _complete_google_auth_code(code: str, redirect_uri: str) -> Dict[str, Any]:
@@ -196,13 +270,13 @@ async def _complete_google_auth_code(code: str, redirect_uri: str) -> Dict[str, 
         )
         if token_response.status_code != 200:
             logger.error("Google token exchange failed: %s", token_response.text)
-            raise HTTPException(status_code=401, detail="Google token exchange failed")
+            raise HTTPException(status_code=401, detail="google_token_exchange_failed")
         token_data = token_response.json()
 
         access_token = token_data.get("access_token")
         id_token = token_data.get("id_token")
         if not access_token:
-            raise HTTPException(status_code=401, detail="Google access token missing")
+            raise HTTPException(status_code=401, detail="google_access_token_missing")
 
         userinfo_response = http_requests.get(
             "https://openidconnect.googleapis.com/v1/userinfo",
@@ -211,48 +285,23 @@ async def _complete_google_auth_code(code: str, redirect_uri: str) -> Dict[str, 
         )
         if userinfo_response.status_code != 200:
             logger.error("Google userinfo failed: %s", userinfo_response.text)
-            raise HTTPException(status_code=401, detail="Google user profile lookup failed")
+            raise HTTPException(status_code=401, detail="google_profile_lookup_failed")
         google_user = userinfo_response.json()
     except http_requests.RequestException as e:
         logger.error("Google OAuth request failed: %s", e)
-        raise HTTPException(status_code=502, detail="Google OAuth provider unavailable")
+        raise HTTPException(status_code=502, detail="google_provider_unavailable")
 
     email = google_user.get("email")
     name = google_user.get("name") or email
     picture = google_user.get("picture", "")
+    google_sub = google_user.get("sub", "")
     if not email:
-        raise HTTPException(status_code=401, detail="Google account email missing")
+        raise HTTPException(status_code=401, detail="google_email_missing")
 
-    user = await db.users.find_one({"email": email}, {"_id": 0})
-    if not user:
-        user_id = f"user_{uuid.uuid4().hex[:12]}"
-        user = {
-            "user_id": user_id,
-            "email": email,
-            "name": name,
-            "picture": picture,
-            "created_at": datetime.now(timezone.utc),
-        }
-        await db.users.insert_one(user.copy())
-    else:
-        await db.users.update_one(
-            {"user_id": user["user_id"]},
-            {"$set": {"name": name, "picture": picture}},
-        )
-
-    session_token = f"google_session_{uuid.uuid4().hex}"
+    user = await _upsert_user_record(email=email, name=name, picture=picture, google_sub=google_sub)
     expires_in = int(token_data.get("expires_in", 3600))
     expires_at = datetime.now(timezone.utc) + timedelta(seconds=expires_in)
-    await db.user_sessions.update_one(
-        {"session_token": session_token},
-        {"$set": {
-            "user_id": user["user_id"],
-            "session_token": session_token,
-            "expires_at": expires_at,
-            "created_at": datetime.now(timezone.utc),
-        }},
-        upsert=True,
-    )
+    session_token = await _create_user_session(user["user_id"], expires_at)
 
     return {
         "session_token": session_token,
@@ -267,6 +316,7 @@ async def _complete_google_auth_code(code: str, redirect_uri: str) -> Dict[str, 
             "picture": picture,
         },
     }
+
 
 @api_router.post("/auth/session")
 async def auth_session(payload: SessionRequest):
@@ -289,22 +339,7 @@ async def auth_session(payload: SessionRequest):
     picture = data.get("picture", "")
     session_token = data["session_token"]
 
-    user = await db.users.find_one({"email": email}, {"_id": 0})
-    if not user:
-        user_id = f"user_{uuid.uuid4().hex[:12]}"
-        user = {
-            "user_id": user_id,
-            "email": email,
-            "name": name,
-            "picture": picture,
-            "created_at": datetime.now(timezone.utc),
-        }
-        await db.users.insert_one(user.copy())
-    else:
-        await db.users.update_one(
-            {"user_id": user["user_id"]},
-            {"$set": {"name": name, "picture": picture}},
-        )
+    user = await _upsert_user_record(email=email, name=name, picture=picture)
 
     expires_at = datetime.now(timezone.utc) + timedelta(days=7)
     await db.user_sessions.update_one(
@@ -327,7 +362,7 @@ async def auth_session(payload: SessionRequest):
 @api_router.get("/auth/google")
 async def auth_google(redirect: Optional[str] = Query(default=None)):
     config = _get_google_oauth_config()
-    final_redirect = redirect or config["frontend_redirect_fallback"]
+    final_redirect = redirect or _get_default_frontend_callback(config["frontend_app_url"])
     if not final_redirect:
         raise HTTPException(status_code=400, detail="Missing redirect URL")
 
@@ -352,39 +387,59 @@ async def auth_google_callback(
     error: Optional[str] = Query(default=None),
 ):
     config = _get_google_oauth_config()
-    frontend_redirect = config["frontend_redirect_fallback"]
+    frontend_redirect = _get_default_frontend_callback(config["frontend_app_url"])
     if state:
         try:
             parsed_state = parse_qs(state)
             frontend_redirect = parsed_state.get("redirect", [frontend_redirect])[0]
         except Exception:
-            frontend_redirect = config["frontend_redirect_fallback"]
+            frontend_redirect = _get_default_frontend_callback(config["frontend_app_url"])
 
     if not frontend_redirect:
         raise HTTPException(status_code=400, detail="Missing frontend redirect URL")
 
+    login_redirect = _derive_google_login_redirect(frontend_redirect, config["frontend_app_url"])
+
     if error:
         return RedirectResponse(
-            url=_build_google_redirect_url(frontend_redirect, {"error": error}),
+            url=_build_google_redirect_url(
+                login_redirect,
+                {"error": _get_google_error_message(error)},
+            ),
             status_code=307,
         )
 
     if not code:
         return RedirectResponse(
-            url=_build_google_redirect_url(frontend_redirect, {"error": "missing_code"}),
+            url=_build_google_redirect_url(
+                login_redirect,
+                {"error": _get_google_error_message("missing_code")},
+            ),
             status_code=307,
         )
 
-    session = await _complete_google_auth_code(code, config["callback_url"])
-    redirect_to = _build_google_redirect_url(frontend_redirect, {"session_token": session["session_token"]})
+    try:
+        session = await _complete_google_auth_code(code, config["callback_url"])
+    except HTTPException as exc:
+        logger.error("Google auth callback failed: %s", exc.detail)
+        return RedirectResponse(
+            url=_build_google_redirect_url(
+                login_redirect,
+                {"error": _get_google_error_message(str(exc.detail or "google_oauth_failed"))},
+            ),
+            status_code=307,
+        )
+
+    redirect_to = _build_google_redirect_url(frontend_redirect, {"token": session["session_token"]})
     response = RedirectResponse(url=redirect_to, status_code=307)
-    response.set_cookie("session_token", session["session_token"], httponly=True, samesite="lax")
+    response.set_cookie(
+        "session_token",
+        session["session_token"],
+        httponly=True,
+        samesite="lax",
+        secure=config["callback_url"].startswith("https://"),
+    )
     return response
-
-
-@api_router.post("/auth/google/exchange")
-async def auth_google_exchange(payload: GoogleExchangeRequest):
-    return await _complete_google_auth_code(payload.code, payload.redirect_uri)
 
 
 @api_router.get("/auth/me")
@@ -404,7 +459,6 @@ async def auth_logout(request: Request, authorization: Optional[str] = Header(de
     if token:
         await db.user_sessions.delete_one({"session_token": token})
     return {"ok": True}
-
 
 # ----------------- Catalog Endpoints -----------------
 @api_router.get("/catalog/substrates")
@@ -1070,3 +1124,4 @@ if __name__ == "__main__":
     import uvicorn
 
     uvicorn.run("server:app", host=BACKEND_HOST, port=BACKEND_PORT, reload=True)
+
