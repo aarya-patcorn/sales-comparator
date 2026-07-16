@@ -1,49 +1,41 @@
-# Emergent Auth Testing Playbook
+# RM Auth Testing Playbook
 
-## Step 1: Create Test User & Session
-```
-mongosh --eval "
-use('test_database');
-var userId = 'test-user-' + Date.now();
-var sessionToken = 'test_session_' + Date.now();
-db.users.insertOne({
-  user_id: userId,
-  email: 'test.user.' + Date.now() + '@example.com',
-  name: 'Test User',
-  picture: 'https://via.placeholder.com/150',
-  created_at: new Date()
-});
-db.user_sessions.insertOne({
-  user_id: userId,
-  session_token: sessionToken,
-  expires_at: new Date(Date.now() + 7*24*60*60*1000),
-  created_at: new Date()
-});
-print('Session token: ' + sessionToken);
-print('User ID: ' + userId);
-"
+## Backend Seed Credentials
+The backend seeds RM users from environment variables on startup.
+
+Default fallback credentials from `backend/.env.example`:
+- User ID: `rm_demo`
+- Password: `ChangeMe123!`
+
+Override them in `backend/.env` with:
+- `RM_DEFAULT_USER_ID`
+- `RM_DEFAULT_PASSWORD`
+- `RM_DEFAULT_NAME`
+- `RM_DEFAULT_EMAIL`
+- or `RM_SEED_USERS_JSON`
+
+## Step 1: Test Backend Login
+```bash
+curl -X POST "$EXPO_PUBLIC_API_URL/api/auth/login" \
+  -H "Content-Type: application/json" \
+  -d '{"user_id":"rm_demo","password":"ChangeMe123!"}'
 ```
 
-## Step 2: Test Backend API
-```
-curl -X GET "$EXPO_PUBLIC_BACKEND_URL/api/auth/me" \
+## Step 2: Test Backend Authenticated API
+```bash
+curl -X GET "$EXPO_PUBLIC_API_URL/api/auth/me" \
   -H "Authorization: Bearer YOUR_SESSION_TOKEN"
 ```
 
 ## Step 3: Frontend Test
-- Expo Go: Google sign-in is not suitable for the native redirect flow. Use the dev login or a development build.
-- Development build: run `npx expo start --dev-client`, open the installed dev client, then tap `Sign in with Google`.
-- The frontend opens `${EXPO_PUBLIC_API_URL}/api/auth/google?redirect=${FRONTEND_CALLBACK_URL}`.
-- Google returns to `${API_URL}/api/auth/google/callback`.
-- Backend creates the app session and redirects to `${FRONTEND_URL}/oauth/callback?token=...`.
-- The frontend callback route validates the token with `/api/auth/me`, stores the session, and routes to `/`.
+- Open the app and enter a seeded RM user ID and password on the login screen.
+- On success, the app should route to `/dashboard`.
+- Reload the app and verify the stored session restores automatically.
+- Tap `Logout` and verify the app returns to `/login`.
 
 ## Checklist
-- Google Cloud Console authorized redirect URI exactly matches `GOOGLE_CALLBACK_URL`.
-- `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_CALLBACK_URL`, and `FRONTEND_APP_URL` are set in `backend/.env`.
-- `EXPO_PUBLIC_API_URL`, `EXPO_PUBLIC_FRONTEND_URL`, and `EXPO_PUBLIC_NATIVE_APP_SCHEME` are set in `Frontend/.env`.
-- Native builds use a LAN, tunnel, or production backend URL rather than `localhost`.
-- User document has `user_id` field (custom UUID).
-- Session user_id matches user's user_id.
-- All queries use `{"_id": 0}` projection.
-- API returns user data without 401.
+- `RM_DEFAULT_USER_ID` and `RM_DEFAULT_PASSWORD` or `RM_SEED_USERS_JSON` are set in `backend/.env`.
+- `EXPO_PUBLIC_API_URL` is set in `Frontend/.env`.
+- The authenticated user returned by `/api/auth/me` includes `role: "rm"`.
+- Unauthorized requests to `/api/auth/me` return `401`.
+- Inactive or non-RM users cannot obtain a session token from `/api/auth/login`.

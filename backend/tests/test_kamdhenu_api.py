@@ -3,9 +3,23 @@ import os
 import requests
 import pytest
 
-BASE_URL = os.environ.get("EXPO_PUBLIC_BACKEND_URL", "https://adhesive-selector.preview.emergentagent.com").rstrip("/")
-DEV_TOKEN = "dev_session_kamdhenu_2026"
-H = {"Authorization": f"Bearer {DEV_TOKEN}"}
+BASE_URL = os.environ.get("EXPO_PUBLIC_BACKEND_URL", os.environ.get("EXPO_PUBLIC_API_URL", "https://adhesive-selector.preview.emergentagent.com")).rstrip("/")
+RM_USER_ID = os.environ.get("RM_DEFAULT_USER_ID", "rm_demo")
+RM_PASSWORD = os.environ.get("RM_DEFAULT_PASSWORD", "ChangeMe123!")
+
+
+def get_auth_headers():
+    response = requests.post(
+        f"{BASE_URL}/api/auth/login",
+        json={"user_id": RM_USER_ID, "password": RM_PASSWORD},
+        timeout=15,
+    )
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    return {"Authorization": f"Bearer {payload['session_token']}"}
+
+
+H = get_auth_headers()
 
 
 # Catalog
@@ -81,7 +95,6 @@ def test_recommend(payload, expected_in):
 
 # Compare
 def test_compare():
-    # Get a competitor product id
     comps = requests.get(f"{BASE_URL}/api/catalog/competitors", timeout=15).json()["competitors"]
     cid = comps[0]["products"][0]["id"]
     r = requests.post(f"{BASE_URL}/api/compare", json={
@@ -103,12 +116,21 @@ def test_auth_me_with_token():
     r = requests.get(f"{BASE_URL}/api/auth/me", headers=H, timeout=15)
     assert r.status_code == 200
     u = r.json()
-    assert u["email"] == "dev.sales@kamdhenu.test"
-    assert u["name"] == "Dev Sales User"
+    assert u["user_id"] == RM_USER_ID
+    assert u["role"] == "rm"
 
 
 def test_auth_me_no_token():
     r = requests.get(f"{BASE_URL}/api/auth/me", timeout=15)
+    assert r.status_code == 401
+
+
+def test_login_rejects_invalid_password():
+    r = requests.post(
+        f"{BASE_URL}/api/auth/login",
+        json={"user_id": RM_USER_ID, "password": "definitely-wrong"},
+        timeout=15,
+    )
     assert r.status_code == 401
 
 
