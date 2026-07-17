@@ -28,7 +28,7 @@ import {
   updateProduct,
 } from "../lib/api";
 import { useAuth } from "../lib/auth";
-import { useToast } from "../lib/toast";
+import { confirmToast, useToast } from "../lib/toast";
 import { formatDate } from "../lib/utils";
 import type { AdminMeta, ProductPayload, ProductRecord } from "../types/admin";
 
@@ -352,7 +352,7 @@ export function ProductManagementPage() {
       return;
     }
 
-    if (!window.confirm(`Delete product ${target.code}?`)) {
+    if (!(await confirmToast(`Delete product ${target.code}?`))) {
       return;
     }
 

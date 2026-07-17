@@ -1,6 +1,6 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 import { AuthProvider } from "./lib/auth";
-import { ToastProvider } from "./lib/toast";
+import { Toaster } from "./components/ui/sonner";
 import { AppShell } from "./components/layout/app-shell";
 import { ProtectedRoute } from "./components/protected-route";
 import { DashboardPage } from "./pages/dashboard-page";
@@ -11,7 +11,8 @@ import { UserManagementPage } from "./pages/user-management-page";
 
 function App() {
   return (
-    <ToastProvider>
+    <>
+    <Toaster position="top-right" duration={4000} richColors closeButton />
       <AuthProvider>
         <Routes>
           <Route path="/login" element={<LoginPage />} />
@@ -32,7 +33,7 @@ function App() {
           <Route path="*" element={<Navigate to="/dashboard" replace />} />
         </Routes>
       </AuthProvider>
-    </ToastProvider>
+    </>
   );
 }
 

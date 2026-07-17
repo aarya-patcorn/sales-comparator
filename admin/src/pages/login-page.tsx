@@ -32,18 +32,18 @@ export function LoginPage() {
       pushToast({ tone: "success", title: "Signed in", description: "Admin session is active." });
       navigate("/dashboard", { replace: true });
     } catch (submissionError) {
-      setError(submissionError instanceof Error ? submissionError.message : "Unable to sign in");
+      pushToast({ tone: "error", title: "Unable to sign in", description: submissionError instanceof Error ? submissionError.message : "Unable to sign in" });
     } finally {
       setSubmitting(false);
     }
   }
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-[#fff] px-4 py-10 text-white sm:px-6">
-      <Card className="w-full max-w-md rounded-2xl border-white/10 bg-[#15191d] text-white shadow-2xl shadow-black/30">
+    <div className="flex min-h-screen items-center justify-center bg-[#F9FAFB] px-4 py-10 text-white sm:px-6">
+      <Card className="w-full max-w-md rounded-2xl border-white/10 bg-[#FFFFFF] text-white shadow-2xl shadow-black/30">
         <CardHeader className="space-y-3 px-6 pb-2 pt-8 sm:px-8 sm:pt-10">
-          <p className="text-xs font-semibold uppercase tracking-[0.24em] text-[#b8c4cf]">Admin Login</p>
-          <CardTitle className="text-3xl tracking-tight text-white">Sign in to continue</CardTitle>
+          <p className="text-xs font-semibold uppercase tracking-[0.24em] text-[#000000]">Admin Login</p>
+          <CardTitle className="text-3xl tracking-tight text-black">Sign in to continue</CardTitle>
           <CardDescription className="text-sm leading-6 text-[#8f9aa5]">
             Use the seeded admin credentials configured in the backend.
           </CardDescription>
@@ -52,9 +52,9 @@ export function LoginPage() {
         <form className="space-y-0" onSubmit={handleSubmit}>
           <CardContent className="space-y-5 px-6 py-7 sm:px-8">
             <div className="space-y-2">
-              <Label className="text-[#dce3e9]" htmlFor="user_id">User ID</Label>
+              <Label className="text-[#8f9aa5]" htmlFor="user_id">User ID</Label>
               <Input
-                className="h-11 rounded-lg border-white/10 bg-[#0e1114] px-3 text-white placeholder:text-[#65717c] focus-visible:border-[#8da0b0] focus-visible:ring-[#8da0b0]/30"
+                className="h-11 rounded-lg border-grey/10 bg-[#F9FAFB] px-3 text-black placeholder:text-[#65717c] focus-visible:border-[#8da0b0] focus-visible:ring-[#8da0b0]/30"
                 id="user_id"
                 value={userId}
                 onChange={(event) => setUserId(event.target.value)}
@@ -62,9 +62,9 @@ export function LoginPage() {
               />
             </div>
             <div className="space-y-2">
-              <Label className="text-[#dce3e9]" htmlFor="password">Password</Label>
+              <Label className="text-[#8f9aa5]" htmlFor="password">Password</Label>
               <Input
-                className="h-11 rounded-lg border-white/10 bg-[#0e1114] px-3 text-white placeholder:text-[#65717c] focus-visible:border-[#8da0b0] focus-visible:ring-[#8da0b0]/30"
+                className="h-11 rounded-lg border-grey/10 bg-[#F9FAFB] px-3 text-black placeholder:text-[#65717c] focus-visible:border-[#8da0b0] focus-visible:ring-[#8da0b0]/30"
                 id="password"
                 type="password"
                 value={password}
@@ -78,7 +78,7 @@ export function LoginPage() {
           </CardContent>
 
           <CardFooter className="px-6 pb-8 sm:px-8 sm:pb-10">
-            <Button className="h-11 w-full rounded-lg bg-white text-[#111519] hover:bg-[#e5ebef]" size="lg" type="submit" disabled={submitting || Boolean(configError)}>
+            <Button className="h-11 w-full rounded-lg bg-black border-grey/10 text-[#ffffff] hover:bg-[#e5ebef]" size="lg" type="submit" disabled={submitting || Boolean(configError)}>
               {submitting ? "Signing in..." : "Sign in"}
             </Button>
           </CardFooter>

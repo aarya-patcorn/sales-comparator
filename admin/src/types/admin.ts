@@ -32,39 +32,20 @@ export type AdminMeta = {
 };
 
 export type AdminUser = {
-  user_id: string;
+  mobileNumber: string;
   name: string;
   email: string;
-  role: "RM" | "ADMIN";
+  role: "RM";
   is_active: boolean;
   status: "active" | "inactive";
   created_at?: string | null;
   updated_at?: string | null;
-  last_login_at?: string | null;
-  must_change_password: boolean;
+  last_login?: string | null;
 };
-
-export type PaginatedUsers = {
-  items: AdminUser[];
-  total: number;
-  page: number;
-  page_size: number;
-};
-
-export type UserPayload = {
-  user_id: string;
-  name: string;
-  email: string;
-  role: "RM" | "ADMIN";
-  is_active: boolean;
-};
-
-export type CreateUserPayload = UserPayload & {
-  password?: string;
-};
-
+export type PaginatedUsers = { items: AdminUser[]; total: number; page: number; page_size: number };
+export type UserPayload = { mobileNumber: string; name: string; email: string; role: "RM"; is_active: boolean };
+export type CreateUserPayload = UserPayload;
 export type UpdateUserPayload = Partial<UserPayload>;
-
 export type ProductRecord = {
   code: string;
   name: string;

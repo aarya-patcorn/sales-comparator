@@ -6,6 +6,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import secrets
 import uuid
 from contextlib import asynccontextmanager
@@ -59,7 +60,6 @@ DEFAULT_SESSION_TTL_DAYS = 7
 DEFAULT_ADMIN_SESSION_TTL_HOURS = 12
 DEFAULT_PASSWORD_HASH_ITERATIONS = 310000
 DEFAULT_MONGO_TIMEOUT_MS = 10000
-DEFAULT_RM_SEED_PASSWORD = "ChangeMe123!"
 DEFAULT_ADMIN_SEED_PASSWORD = "AdminChangeMe123!"
 DEFAULT_CORS_ORIGINS = [
     "http://localhost:8081",
@@ -74,12 +74,12 @@ _openai_client: Optional[OpenAI] = None
 _openai_api_key: Optional[str] = None
 SESSION_TOKEN_INDEX_NAME = "session_token_hash_1"
 SESSION_TTL_INDEX_NAME = "expires_at_1"
-USER_LOGIN_ID_INDEX_NAME = "login_id_normalized_1"
-USER_ID_INDEX_NAME = "user_id_1"
+RM_MOBILE_INDEX_NAME = "mobileNumber_unique"
+ADMIN_LOGIN_ID_INDEX_NAME = "login_id_normalized_unique"
 PRODUCT_CODE_INDEX_NAME = "code_normalized_active_unique"
 PRODUCT_NAME_INDEX_NAME = "name_normalized_active_1"
 PRODUCT_STATUS_INDEX_NAME = "is_active_1_is_deleted_1"
-USER_STATUS_INDEX_NAME = "role_1_is_active_1"
+USER_STATUS_INDEX_NAME = "role_1_isActive_1"
 PRODUCT_PARAM_KEYS = sorted({key for product in KAMDHENU_PRODUCTS for key in product["params"].keys()})
 
 
@@ -97,12 +97,11 @@ class AppSettings(BaseModel):
     session_ttl_days: int = Field(default=DEFAULT_SESSION_TTL_DAYS, ge=1, le=90)
     admin_session_ttl_hours: int = Field(default=DEFAULT_ADMIN_SESSION_TTL_HOURS, ge=1, le=168)
     password_hash_iterations: int = Field(default=DEFAULT_PASSWORD_HASH_ITERATIONS, ge=100000, le=1000000)
-    rm_default_user_id: str = "rm_demo"
-    rm_default_password: str = DEFAULT_RM_SEED_PASSWORD
+    admin_db_name: str = "aarya_admin"
+    rm_default_mobile_number: str = "9999999999"
     rm_default_name: str = "Demo RM"
     rm_default_email: str = "rm.demo@kamdhenu.test"
     rm_seed_users_json: str = ""
-    rm_force_seed_password_reset: bool = False
     admin_default_user_id: str = "admin"
     admin_default_password: str = DEFAULT_ADMIN_SEED_PASSWORD
     admin_default_name: str = "Admin User"
@@ -120,54 +119,43 @@ class LoginRequest(BaseModel):
     password: str = Field(min_length=1, max_length=512)
 
 
-class AdminUserBase(BaseModel):
+class RMLoginRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-    user_id: str = Field(min_length=1, max_length=128)
+    mobile_number: str = Field(min_length=7, max_length=32, alias="mobileNumber")
+
+
+class AdminUserBase(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     name: str = Field(min_length=1, max_length=200)
     email: str = Field(default="", max_length=320)
+    mobile_number: str = Field(min_length=7, max_length=32, alias="mobileNumber")
     role: str = Field(default="RM", min_length=2, max_length=16)
     is_active: bool = True
-
     @field_validator("role")
     @classmethod
     def validate_role(cls, value: str) -> str:
         normalized = value.strip().upper()
-        if normalized not in {"RM", "ADMIN"}:
-            raise ValueError("Role must be RM or ADMIN")
+        if normalized != "RM": raise ValueError("Only RM users can be managed here")
         return normalized
 
-
 class AdminUserCreateRequest(AdminUserBase):
-    password: Optional[str] = Field(default=None, min_length=8, max_length=512)
-
+    pass
 
 class AdminUserUpdateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-
-    user_id: Optional[str] = Field(default=None, min_length=1, max_length=128)
     name: Optional[str] = Field(default=None, min_length=1, max_length=200)
     email: Optional[str] = Field(default=None, max_length=320)
+    mobile_number: Optional[str] = Field(default=None, min_length=7, max_length=32, alias="mobileNumber")
     role: Optional[str] = Field(default=None, min_length=2, max_length=16)
     is_active: Optional[bool] = None
-
     @field_validator("role")
     @classmethod
     def validate_role(cls, value: Optional[str]) -> Optional[str]:
-        if value is None:
-            return value
+        if value is None: return value
         normalized = value.strip().upper()
-        if normalized not in {"RM", "ADMIN"}:
-            raise ValueError("Role must be RM or ADMIN")
+        if normalized != "RM": raise ValueError("Only RM users can be managed here")
         return normalized
-
-
-class AdminUserPasswordResetRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-
-    password: Optional[str] = Field(default=None, min_length=8, max_length=512)
-
-
 class AdminProductBase(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
@@ -441,13 +429,12 @@ def load_settings() -> AppSettings:
         "openai_model": os.environ.get("OPENAI_MODEL", DEFAULT_OPENAI_MODEL).strip() or DEFAULT_OPENAI_MODEL,
         "session_ttl_days": int(os.environ.get("SESSION_TTL_DAYS", str(DEFAULT_SESSION_TTL_DAYS))),
         "admin_session_ttl_hours": int(os.environ.get("ADMIN_SESSION_TTL_HOURS", str(DEFAULT_ADMIN_SESSION_TTL_HOURS))),
-        "password_hash_iterations": int(os.environ.get("RM_PASSWORD_HASH_ITERATIONS", str(DEFAULT_PASSWORD_HASH_ITERATIONS))),
-        "rm_default_user_id": os.environ.get("RM_DEFAULT_USER_ID", "rm_demo").strip() or "rm_demo",
-        "rm_default_password": os.environ.get("RM_DEFAULT_PASSWORD", DEFAULT_RM_SEED_PASSWORD).strip() or DEFAULT_RM_SEED_PASSWORD,
+        "password_hash_iterations": int(os.environ.get("ADMIN_PASSWORD_HASH_ITERATIONS", str(DEFAULT_PASSWORD_HASH_ITERATIONS))),
+        "admin_db_name": os.environ.get("ADMIN_DB_NAME", "aarya_admin").strip() or "aarya_admin",
+        "rm_default_mobile_number": os.environ.get("RM_DEFAULT_MOBILE_NUMBER", "9999999999").strip(),
         "rm_default_name": os.environ.get("RM_DEFAULT_NAME", "Demo RM").strip() or "Demo RM",
         "rm_default_email": os.environ.get("RM_DEFAULT_EMAIL", "rm.demo@kamdhenu.test").strip() or "rm.demo@kamdhenu.test",
         "rm_seed_users_json": os.environ.get("RM_SEED_USERS_JSON", "").strip(),
-        "rm_force_seed_password_reset": _parse_bool(os.environ.get("RM_FORCE_SEED_PASSWORD_RESET"), False),
         "admin_default_user_id": os.environ.get("ADMIN_DEFAULT_USER_ID", "admin").strip() or "admin",
         "admin_default_password": os.environ.get("ADMIN_DEFAULT_PASSWORD", DEFAULT_ADMIN_SEED_PASSWORD).strip() or DEFAULT_ADMIN_SEED_PASSWORD,
         "admin_default_name": os.environ.get("ADMIN_DEFAULT_NAME", "Admin User").strip() or "Admin User",
@@ -484,6 +471,13 @@ def _get_openai_client(settings: AppSettings) -> OpenAI:
     return _openai_client
 
 
+async def get_admin_db(request: Request) -> AsyncIOMotorDatabase:
+    db = getattr(request.app.state, "admin_db", None)
+    if db is None:
+        raise HTTPException(status_code=503, detail="Admin database not initialized")
+    return db
+
+
 async def get_db(request: Request) -> AsyncIOMotorDatabase:
     db = getattr(request.app.state, "db", None)
     if db is None:
@@ -500,6 +494,32 @@ def get_settings_from_request(request: Request) -> AppSettings:
 
 def _normalize_login_id(user_id: str) -> str:
     return user_id.strip().lower()
+
+
+def _normalize_utc_datetime(value: Any) -> Optional[datetime]:
+    """Return a valid UTC-aware datetime for MongoDB/Python values, or None."""
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value.strip())
+        except (TypeError, ValueError, OverflowError):
+            return None
+    if not isinstance(value, datetime):
+        return None
+    try:
+        if value.tzinfo is None or value.utcoffset() is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _serialize_utc_datetime(value: Any) -> Optional[str]:
+    normalized = _normalize_utc_datetime(value)
+    return normalized.isoformat() if normalized is not None else None
 
 
 def _normalize_role_label(role: Any) -> str:
@@ -591,32 +611,29 @@ def _extract_session_token(request: Request, authorization: Optional[str]) -> Op
     return None
 
 
+def _extract_user_mobile_number(user: Dict[str, Any]) -> Optional[str]:
+    for field in ("mobileNumber", "mobile_number", "mobile", "phone", "phone_number", "contact_number", "user_id"):
+        value = user.get(field)
+        if value is None or str(value).strip() == "":
+            continue
+        try:
+            return _normalize_mobile_number(value)
+        except ValueError:
+            continue
+    return None
+
+
 def _public_user(user: Dict[str, Any]) -> Dict[str, Any]:
-    role = "ADMIN" if _is_admin_role(user.get("role")) else "rm"
-    return {
-        "user_id": user["user_id"],
-        "email": user.get("email", ""),
-        "name": user.get("name", user["user_id"]),
-        "picture": user.get("picture", ""),
-        "role": role,
-    }
+    if _is_admin_role(user.get("role")):
+        user_id = str(user.get("user_id") or "").strip()
+        return {"user_id": user_id, "email": user.get("email", ""), "name": user.get("name") or user_id, "picture": user.get("picture", ""), "role": "ADMIN"}
+    mobile = _extract_user_mobile_number(user)
+    return {"mobileNumber": mobile or "", "email": user.get("email", ""), "name": user.get("name") or "RM", "picture": user.get("picture", ""), "role": "rm"}
 
 
 def _serialize_admin_user(user: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        "user_id": user["user_id"],
-        "name": user.get("name", user["user_id"]),
-        "email": user.get("email", ""),
-        "role": _normalize_role_label(user.get("role") or "RM"),
-        "is_active": bool(user.get("is_active", True)),
-        "status": "active" if user.get("is_active", True) else "inactive",
-        "created_at": user.get("created_at"),
-        "updated_at": user.get("updated_at"),
-        "last_login_at": user.get("last_login_at"),
-        "must_change_password": bool(user.get("must_change_password", False)),
-    }
-
-
+    mobile = _extract_user_mobile_number(user)
+    return {"mobileNumber": mobile or "", "name": user.get("name") or "RM", "email": user.get("email") or "", "role": "RM", "is_active": bool(user.get("isActive", user.get("is_active", True))), "status": "active" if user.get("isActive", user.get("is_active", True)) else "inactive", "created_at": _serialize_utc_datetime(user.get("createdAt", user.get("created_at"))), "updated_at": _serialize_utc_datetime(user.get("updatedAt", user.get("updated_at"))), "last_login": _serialize_utc_datetime(user.get("lastLogin", user.get("last_login_at"))), "is_valid": mobile is not None, "migration_status": "ok" if mobile is not None else "invalid_mobile"}
 def _serialize_product(product: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "code": product["code"],
@@ -637,6 +654,32 @@ def _serialize_product(product: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+async def migrate_rm_users(db: AsyncIOMotorDatabase) -> None:
+    for index_name in ("login_id_normalized_1", "user_id_1"):
+        try: await db.users.drop_index(index_name)
+        except OperationFailure: pass
+    cursor = db.users.find({"$or": [{"role": {"$in": ["rm", "RM"]}}, {"mobileNumber": {"$exists": True}}, {"mobile_number": {"$exists": True}}, {"mobile": {"$exists": True}}, {"phone": {"$exists": True}}, {"phone_number": {"$exists": True}}]})
+    async for legacy in cursor:
+        mobile = _extract_user_mobile_number(legacy)
+        if mobile is None:
+            logger.warning("RM migration skipped record %s without a usable mobileNumber", legacy.get("_id"))
+            continue
+        now = datetime.now(timezone.utc)
+        update = {"mobileNumber": mobile, "name": str(legacy.get("name") or "RM").strip(), "email": str(legacy.get("email") or "").strip(), "role": "rm", "isActive": bool(legacy.get("isActive", legacy.get("is_active", True))), "createdAt": legacy.get("createdAt") or legacy.get("created_at") or now, "updatedAt": now, "lastLogin": legacy.get("lastLogin") or legacy.get("last_login_at")}
+        try:
+            await db.users.update_one({"_id": legacy["_id"]}, {"$set": update, "$unset": {"user_id": "", "login_id_normalized": "", "password_hash": "", "password_salt": "", "password_hash_algorithm": "", "password_hash_iterations": "", "password_updated_at": "", "must_change_password": "", "auth_provider": "", "is_active": "", "created_at": "", "updated_at": "", "last_login_at": "", "mobile_number": "", "mobile": "", "phone": "", "phone_number": "", "contact_number": ""}})
+        except DuplicateKeyError:
+            logger.warning("RM migration skipped duplicate mobileNumber %s for record %s", mobile, legacy.get("_id"))
+
+
+def _normalize_mobile_number(value: Any) -> str:
+    raw = str(value or "").strip()
+    normalized = re.sub(r"[\s().+\-]", "", raw)
+    if not normalized.isdigit() or not 7 <= len(normalized) <= 15:
+        raise ValueError("Mobile number must contain 7 to 15 digits")
+    return normalized
+
+
 def _parse_seed_rm_users(settings: AppSettings) -> List[Dict[str, Any]]:
     if settings.rm_seed_users_json:
         try:
@@ -645,63 +688,19 @@ def _parse_seed_rm_users(settings: AppSettings) -> List[Dict[str, Any]]:
             raise RuntimeError(f"Invalid RM_SEED_USERS_JSON: {exc}") from exc
         if not isinstance(parsed, list):
             raise RuntimeError("RM_SEED_USERS_JSON must be a JSON array")
-        seed_users = [entry for entry in parsed if isinstance(entry, dict)]
-        if not seed_users:
-            raise RuntimeError("RM_SEED_USERS_JSON did not contain any valid user objects")
-        return seed_users
-
-    return [
-        {
-            "user_id": settings.rm_default_user_id,
-            "password": settings.rm_default_password,
-            "name": settings.rm_default_name,
-            "email": settings.rm_default_email,
-            "role": "rm",
-            "is_active": True,
-        }
-    ]
+        return [entry for entry in parsed if isinstance(entry, dict)]
+    return [{"mobileNumber": settings.rm_default_mobile_number, "name": settings.rm_default_name, "email": settings.rm_default_email, "role": "RM", "isActive": True}]
 
 
 async def _upsert_seed_rm_user(db: AsyncIOMotorDatabase, seed_user: Dict[str, Any], settings: AppSettings) -> bool:
-    login_id = str(seed_user.get("user_id", "")).strip()
-    password = str(seed_user.get("password", "")).strip()
-    if not login_id or not password:
-        logger.warning("Skipping invalid RM seed user without user_id/password")
+    try:
+        mobile = _normalize_mobile_number(seed_user.get("mobileNumber") or seed_user.get("mobile_number"))
+    except ValueError:
+        logger.warning("Skipping invalid RM seed user without a valid mobileNumber")
         return False
-
-    normalized_login_id = _normalize_login_id(login_id)
     now = datetime.now(timezone.utc)
-    existing = await db.users.find_one({"login_id_normalized": normalized_login_id}, {"_id": 0})
-    update_fields: Dict[str, Any] = {
-        "user_id": login_id,
-        "login_id_normalized": normalized_login_id,
-        "email": str(seed_user.get("email", "")).strip(),
-        "name": str(seed_user.get("name", login_id)).strip() or login_id,
-        "picture": str(seed_user.get("picture", "")).strip(),
-        "role": _role_for_storage(str(seed_user.get("role", "RM"))),
-        "is_active": bool(seed_user.get("is_active", True)),
-        "auth_provider": "rm_credentials",
-        "must_change_password": bool(seed_user.get("must_change_password", False)),
-        "updated_at": now,
-        "updated_by": "system_seed",
-    }
-
-    should_reset_password = settings.rm_force_seed_password_reset or not existing or not existing.get("password_hash")
-    if should_reset_password:
-        update_fields.update(_create_password_record(password, settings.password_hash_iterations))
-
-    await db.users.update_one(
-        {"login_id_normalized": normalized_login_id},
-        {
-            "$set": update_fields,
-            "$setOnInsert": {
-                "created_at": now,
-                "created_by": "system_seed",
-                "last_login_at": None,
-            },
-        },
-        upsert=True,
-    )
+    document = {"mobileNumber": mobile, "name": str(seed_user.get("name", "RM")).strip() or "RM", "email": str(seed_user.get("email", "")).strip(), "role": "rm", "isActive": bool(seed_user.get("isActive", seed_user.get("is_active", True))), "createdAt": now, "updatedAt": now, "lastLogin": None}
+    await db.users.update_one({"mobileNumber": mobile}, {"$set": document}, upsert=True)
     return True
 
 
@@ -729,24 +728,7 @@ async def _ensure_collection_validator(db: AsyncIOMotorDatabase, collection_name
 
 
 async def ensure_collection_validators(db: AsyncIOMotorDatabase) -> None:
-    user_validator = {
-        "$jsonSchema": {
-            "bsonType": "object",
-            "required": ["user_id", "login_id_normalized", "name", "role", "is_active", "created_at", "updated_at"],
-            "properties": {
-                "user_id": {"bsonType": "string", "minLength": 1},
-                "login_id_normalized": {"bsonType": "string", "minLength": 1},
-                "name": {"bsonType": "string", "minLength": 1},
-                "email": {"bsonType": ["string", "null"]},
-                "role": {"enum": ["rm", "ADMIN"]},
-                "is_active": {"bsonType": "bool"},
-                "created_at": {"bsonType": "date"},
-                "updated_at": {"bsonType": "date"},
-                "last_login_at": {"bsonType": ["date", "null"]},
-                "must_change_password": {"bsonType": ["bool", "null"]},
-            },
-        }
-    }
+    user_validator = {"$jsonSchema": {"bsonType": "object", "required": ["name", "email", "mobileNumber", "role", "isActive", "createdAt", "updatedAt", "lastLogin"], "properties": {"name": {"bsonType": "string", "minLength": 1}, "email": {"bsonType": "string"}, "mobileNumber": {"bsonType": "string", "minLength": 7}, "role": {"enum": ["rm"]}, "isActive": {"bsonType": "bool"}, "createdAt": {"bsonType": "date"}, "updatedAt": {"bsonType": "date"}, "lastLogin": {"bsonType": ["date", "null"]}}}}
     product_validator = {
         "$jsonSchema": {
             "bsonType": "object",
@@ -855,8 +837,6 @@ async def seed_rm_users(db: AsyncIOMotorDatabase, settings: AppSettings) -> None
         if await _upsert_seed_rm_user(db, seed_user, settings):
             seeded_count += 1
 
-    if settings.rm_default_password == DEFAULT_RM_SEED_PASSWORD:
-        logger.warning("RM_DEFAULT_PASSWORD is using the default demo password. Change it for production deployments.")
 
     logger.info("Seeded or verified %s RM credential user(s).", seeded_count)
 
@@ -883,34 +863,13 @@ async def _upsert_seed_admin_user(db: AsyncIOMotorDatabase, seed_user: Dict[str,
     if not login_id or not password:
         logger.warning("Skipping invalid admin seed user without user_id/password")
         return False
-
     normalized_login_id = _normalize_login_id(login_id)
     now = datetime.now(timezone.utc)
-    existing = await db.users.find_one({"login_id_normalized": normalized_login_id}, {"_id": 0})
-    update_fields: Dict[str, Any] = {
-        "user_id": login_id,
-        "login_id_normalized": normalized_login_id,
-        "email": str(seed_user.get("email", "")).strip(),
-        "name": str(seed_user.get("name", login_id)).strip() or login_id,
-        "picture": str(seed_user.get("picture", "")).strip(),
-        "role": "ADMIN",
-        "is_active": bool(seed_user.get("is_active", True)),
-        "auth_provider": "admin_credentials",
-        "must_change_password": bool(seed_user.get("must_change_password", False)),
-        "updated_at": now,
-        "updated_by": "system_seed",
-    }
+    existing = await db.admin_users.find_one({"login_id_normalized": normalized_login_id}, {"_id": 0})
+    update_fields = {"user_id": login_id, "login_id_normalized": normalized_login_id, "email": str(seed_user.get("email", "")).strip(), "name": str(seed_user.get("name", login_id)).strip() or login_id, "role": "ADMIN", "is_active": bool(seed_user.get("is_active", True)), "updated_at": now, "updated_by": "system_seed"}
     if not existing or not existing.get("password_hash"):
         update_fields.update(_create_password_record(password, settings.password_hash_iterations))
-
-    await db.users.update_one(
-        {"login_id_normalized": normalized_login_id},
-        {
-            "$set": update_fields,
-            "$setOnInsert": {"created_at": now, "created_by": "system_seed", "last_login_at": None},
-        },
-        upsert=True,
-    )
+    await db.admin_users.update_one({"login_id_normalized": normalized_login_id}, {"$set": update_fields, "$setOnInsert": {"created_at": now, "last_login_at": None}}, upsert=True)
     return True
 
 
@@ -929,8 +888,11 @@ async def seed_admin_users(db: AsyncIOMotorDatabase, settings: AppSettings) -> N
 
 async def _create_user_session(db: AsyncIOMotorDatabase, user_id: str, expires_at: datetime) -> str:
     normalized_user_id = user_id.strip()
+    normalized_expires_at = _normalize_utc_datetime(expires_at)
     if not normalized_user_id:
         raise ValueError("Cannot create a session without a user_id")
+    if normalized_expires_at is None:
+        raise ValueError("Cannot create a session with an invalid expires_at")
 
     for attempt in range(3):
         session_token = f"rm_session_{secrets.token_urlsafe(32)}"
@@ -941,8 +903,8 @@ async def _create_user_session(db: AsyncIOMotorDatabase, user_id: str, expires_a
         session_doc = {
             "user_id": normalized_user_id,
             "session_token_hash": session_token_hash,
-            "expires_at": expires_at,
-            "created_at": datetime.now(timezone.utc),
+            "expires_at": normalized_expires_at,
+            "created_at": _utc_now(),
         }
         try:
             await db.user_sessions.insert_one(session_doc)
@@ -982,6 +944,65 @@ def _is_expected_session_ttl_index(index_document: Dict[str, Any]) -> bool:
     )
 
 
+def _is_expected_user_status_index(index_document: Dict[str, Any]) -> bool:
+    return (
+        _normalize_index_key(index_document) == (("role", ASCENDING), ("isActive", ASCENDING))
+        and index_document.get("name") == USER_STATUS_INDEX_NAME
+        and index_document.get("unique") is not True
+    )
+
+
+async def _migrate_user_is_active_field(db: AsyncIOMotorDatabase) -> None:
+    if await db.users.count_documents({"isActive": {"$exists": False}, "is_active": {"$exists": True}}) == 0:
+        return
+
+    logger.info("Migrating legacy users from is_active to isActive.")
+    result_true = await db.users.update_many(
+        {"isActive": {"$exists": False}, "is_active": True},
+        {"$set": {"isActive": True}, "$unset": {"is_active": ""}},
+    )
+    result_false = await db.users.update_many(
+        {"isActive": {"$exists": False}, "is_active": {"$exists": True}, "is_active": {"$ne": True}},
+        {"$set": {"isActive": False}, "$unset": {"is_active": ""}},
+    )
+    logger.info(
+        "Migrated legacy is_active field to isActive on %s users (true values) and %s users (non-true values).",
+        result_true.modified_count,
+        result_false.modified_count,
+    )
+
+
+async def _ensure_user_status_index(db: AsyncIOMotorDatabase) -> None:
+    collection = db.users
+    index_present = False
+    for index_document in await collection.list_indexes().to_list(length=None):
+        index_name = index_document.get("name", "<unnamed>")
+        index_key = _normalize_index_key(index_document)
+
+        if index_key == (("role", ASCENDING), ("isActive", ASCENDING)) and index_name == USER_STATUS_INDEX_NAME:
+            index_present = True
+            logger.info("Verified user status index %s on %s.", index_name, collection.name)
+            break
+
+        if index_key == (("role", ASCENDING), ("is_active", ASCENDING)):
+            logger.info("Dropping legacy conflicting user status index %s on %s.", index_name, collection.name)
+            await _drop_index_with_logging(collection, index_name, "replacing legacy user status index with updated isActive field")
+            continue
+
+        if index_name == USER_STATUS_INDEX_NAME:
+            logger.info("Dropping conflicting user status index %s on %s because it does not match expected key.", index_name, collection.name)
+            await _drop_index_with_logging(collection, index_name, "replacing conflicting user status index with expected isActive key")
+            continue
+
+    if not index_present:
+        logger.info("Creating user status index %s on %s.", USER_STATUS_INDEX_NAME, collection.name)
+        await collection.create_index(
+            [("role", ASCENDING), ("isActive", ASCENDING)],
+            name=USER_STATUS_INDEX_NAME,
+            background=True,
+        )
+
+
 async def _drop_index_with_logging(collection: Any, index_name: str, reason: str) -> None:
     logger.warning("Dropping conflicting index %s on %s: %s", index_name, collection.name, reason)
     try:
@@ -999,13 +1020,19 @@ async def _cleanup_invalid_user_sessions(collection: Any) -> int:
             {"session_token_hash": None},
             {"session_token_hash": ""},
             {"session_token_hash": {"$regex": r"^\s+$"}},
+            {"expires_at": {"$exists": False}},
+            {"expires_at": None},
+            {"expires_at": {"$not": {"$type": "date"}}},
+            {"created_at": {"$exists": False}},
+            {"created_at": None},
+            {"created_at": {"$not": {"$type": "date"}}},
         ]
     }
     result = await collection.delete_many(invalid_filter)
     deleted_count = int(result.deleted_count)
     if deleted_count:
         logger.warning(
-            "Deleted %s invalid session document(s) with missing or empty session_token_hash.",
+            "Deleted %s invalid session document(s) with missing token or invalid session datetimes.",
             deleted_count,
         )
     else:
@@ -1104,64 +1131,46 @@ async def ensure_user_session_indexes(db: AsyncIOMotorDatabase) -> None:
     logger.info("Finished reconciling MongoDB indexes for %s.", collection.name)
 
 
-async def _get_authenticated_user(
-    request: Request,
-    authorization: Optional[str] = Header(default=None),
-    db: AsyncIOMotorDatabase = Depends(get_db),
-) -> Dict[str, Any]:
+async def _get_authenticated_user(request: Request, authorization: Optional[str] = Header(default=None), db: AsyncIOMotorDatabase = Depends(get_db)) -> Dict[str, Any]:
     token = _extract_session_token(request, authorization)
-    if not token:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-
-    try:
-        session_token_hash = _hash_session_token(token)
-    except ValueError as exc:
-        raise HTTPException(status_code=401, detail="Invalid session") from exc
-
-    session_doc = await db.user_sessions.find_one({"session_token_hash": session_token_hash})
-    if not session_doc:
-        raise HTTPException(status_code=401, detail="Invalid session")
-
-    stored_token_hash = session_doc.get("session_token_hash")
-    if not _is_valid_session_token_hash(stored_token_hash):
-        await _delete_session_by_id(db, session_doc["_id"], "missing or empty session_token_hash")
-        raise HTTPException(status_code=401, detail="Session invalid")
-
-    expires_at = session_doc.get("expires_at")
-    if isinstance(expires_at, str):
-        expires_at = datetime.fromisoformat(expires_at)
-    if isinstance(expires_at, datetime) and expires_at.tzinfo is None:
-        expires_at = expires_at.replace(tzinfo=timezone.utc)
-    if not isinstance(expires_at, datetime):
-        await _delete_session_by_id(db, session_doc["_id"], "invalid expires_at value")
-        raise HTTPException(status_code=401, detail="Session invalid")
-    if expires_at <= datetime.now(timezone.utc):
-        await _delete_session_by_id(db, session_doc["_id"], "session expired")
+    if not token: raise HTTPException(status_code=401, detail="Not authenticated")
+    session_doc = await db.user_sessions.find_one({"session_token_hash": _hash_session_token(token)})
+    if not session_doc: raise HTTPException(status_code=401, detail="Invalid session")
+    expires_at = _normalize_utc_datetime(session_doc.get("expires_at"))
+    if expires_at is None or expires_at <= _utc_now():
+        await db.user_sessions.delete_one({"_id": session_doc["_id"]})
         raise HTTPException(status_code=401, detail="Session expired")
+    try:
+        session_mobile = _normalize_mobile_number(session_doc.get("user_id", "")) if session_doc.get("user_id") else None
+    except ValueError:
+        session_mobile = None
+    user = await db.users.find_one({"$or": [{"mobileNumber": session_mobile}, {"mobile_number": session_mobile}, {"mobile": session_mobile}, {"phone": session_mobile}, {"phone_number": session_mobile}], "role": {"$in": ["rm", "RM"]}}, {"_id": 0}) if session_mobile else None
+    if not user or _extract_user_mobile_number(user) != session_mobile or not user.get("isActive", user.get("is_active", True)): raise HTTPException(status_code=403, detail="User is inactive")
+    return user
 
-    user = await db.users.find_one({"user_id": session_doc["user_id"]}, {"_id": 0})
-    if not user:
-        raise HTTPException(status_code=401, detail="User not found")
-    if not user.get("is_active", True):
-        raise HTTPException(status_code=403, detail="User is inactive")
+
+async def _get_authenticated_admin_user(request: Request, authorization: Optional[str] = Header(default=None), db: AsyncIOMotorDatabase = Depends(get_admin_db)) -> Dict[str, Any]:
+    token = _extract_session_token(request, authorization)
+    if not token: raise HTTPException(status_code=401, detail="Not authenticated")
+    session_doc = await db.user_sessions.find_one({"session_token_hash": _hash_session_token(token)})
+    if not session_doc: raise HTTPException(status_code=401, detail="Invalid session")
+    expires_at = _normalize_utc_datetime(session_doc.get("expires_at"))
+    if expires_at is None or expires_at <= _utc_now():
+        await db.user_sessions.delete_one({"_id": session_doc["_id"]})
+        raise HTTPException(status_code=401, detail="Session expired")
+    user = await db.admin_users.find_one({"user_id": session_doc["user_id"]}, {"_id": 0})
+    if not user or not user.get("is_active", True): raise HTTPException(status_code=403, detail="User is inactive")
     return user
 
 
 async def get_current_user(user: Dict[str, Any] = Depends(_get_authenticated_user)) -> Dict[str, Any]:
-    if not _is_rm_role(user.get("role")):
-        raise HTTPException(status_code=403, detail="RM access required")
+    if not _is_rm_role(user.get("role")): raise HTTPException(status_code=403, detail="RM access required")
     return user
 
 
-async def get_current_admin_user(user: Dict[str, Any] = Depends(_get_authenticated_user)) -> Dict[str, Any]:
-    if not _is_admin_role(user.get("role")):
-        raise HTTPException(status_code=403, detail="ADMIN access required")
+async def get_current_admin_user(user: Dict[str, Any] = Depends(_get_authenticated_admin_user)) -> Dict[str, Any]:
+    if not _is_admin_role(user.get("role")): raise HTTPException(status_code=403, detail="ADMIN access required")
     return user
-
-
-async def _record_user_login(db: AsyncIOMotorDatabase, user_id: str) -> None:
-    now = datetime.now(timezone.utc)
-    await db.users.update_one({"user_id": user_id}, {"$set": {"last_login_at": now, "updated_at": now}})
 
 
 async def seed_competitors(db: AsyncIOMotorDatabase) -> None:
@@ -1177,9 +1186,19 @@ async def seed_competitors(db: AsyncIOMotorDatabase) -> None:
 async def ensure_database_indexes(db: AsyncIOMotorDatabase) -> None:
     logger.info("Ensuring MongoDB indexes for core collections.")
     await ensure_collection_validators(db)
-    await db.users.create_index([("login_id_normalized", ASCENDING)], name=USER_LOGIN_ID_INDEX_NAME, unique=True, background=True)
-    await db.users.create_index([("user_id", ASCENDING)], name=USER_ID_INDEX_NAME, unique=True, background=True)
-    await db.users.create_index([("role", ASCENDING), ("is_active", ASCENDING)], name=USER_STATUS_INDEX_NAME, background=True)
+    await _migrate_user_is_active_field(db)
+    await _ensure_user_status_index(db)
+    # Create a partial unique index on mobileNumber to avoid duplicates for null/empty
+    try:
+        await db.users.create_index(
+            [("mobileNumber", ASCENDING)],
+            name=RM_MOBILE_INDEX_NAME,
+            unique=True,
+            background=True,
+            partialFilterExpression={"mobileNumber": {"$type": "string", "$gt": ""}},
+        )
+    except Exception:
+        logger.exception("Failed to create partial unique mobileNumber index; proceeding without blocking startup")
     await ensure_user_session_indexes(db)
     await db.products.create_index(
         [("code_normalized", ASCENDING)],
@@ -1211,6 +1230,10 @@ async def lifespan(app: FastAPI):
 
     if not settings.mongo_url or not settings.db_name:
         raise RuntimeError("MONGO_URL and DB_NAME must be configured before starting the backend")
+    if settings.admin_db_name.strip().lower() in {"admin", "local", "config"}:
+        raise RuntimeError("ADMIN_DB_NAME must be a normal application database, not MongoDB reserved database 'admin', 'local', or 'config'")
+    if settings.admin_db_name.strip() == settings.db_name.strip():
+        raise RuntimeError("ADMIN_DB_NAME must be different from DB_NAME")
 
     client = AsyncIOMotorClient(
         settings.mongo_url,
@@ -1219,19 +1242,25 @@ async def lifespan(app: FastAPI):
         uuidRepresentation="standard",
     )
     db = client[settings.db_name]
+    admin_db = client[settings.admin_db_name]
 
     try:
         await client.admin.command("ping")
         logger.info("Connected to MongoDB database %s.", settings.db_name)
+        await migrate_rm_users(db)
         await ensure_database_indexes(db)
+        await _ensure_collection_validator(admin_db, "admin_users", {"$jsonSchema": {"bsonType": "object", "required": ["user_id", "login_id_normalized", "name", "role", "is_active", "created_at", "updated_at"], "properties": {"user_id": {"bsonType": "string", "minLength": 1}, "login_id_normalized": {"bsonType": "string", "minLength": 1}, "name": {"bsonType": "string", "minLength": 1}, "email": {"bsonType": "string"}, "role": {"enum": ["ADMIN"]}, "is_active": {"bsonType": "bool"}, "created_at": {"bsonType": "date"}, "updated_at": {"bsonType": "date"}}}})
+        await admin_db.admin_users.create_index([("login_id_normalized", ASCENDING)], name=ADMIN_LOGIN_ID_INDEX_NAME, unique=True, background=True)
+        await ensure_user_session_indexes(admin_db)
         await seed_rm_users(db, settings)
-        await seed_admin_users(db, settings)
+        await seed_admin_users(admin_db, settings)
         await seed_kamdhenu_products(db)
         await ensure_competitor_tds_seeded(db)
         start_competitor_tds_scheduler(db, logger)
         app.state.settings = settings
         app.state.mongo_client = client
         app.state.db = db
+        app.state.admin_db = admin_db
         logger.info("Backend startup completed successfully.")
         yield
     except Exception:
@@ -1327,63 +1356,29 @@ def _kamdhenu_wins(param: str, kam_val: str, comp_vals: List[str]) -> bool:
 
 
 @api_router.post("/auth/login")
-async def auth_login(
-    payload: LoginRequest,
-    db: AsyncIOMotorDatabase = Depends(get_db),
-    settings: AppSettings = Depends(get_settings_from_request),
-):
-    user = await db.users.find_one(
-        {"login_id_normalized": _normalize_login_id(payload.user_id)},
-        {"_id": 0},
-    )
-    if not user or not _is_rm_role(user.get("role")) or not user.get("is_active", True):
-        logger.warning("RM login failed for user_id=%s: invalid user", payload.user_id)
-        raise HTTPException(status_code=401, detail="Invalid user ID or password")
-
-    if not _verify_password(payload.password, user, settings):
-        logger.warning("RM login failed for user_id=%s: invalid password", payload.user_id)
-        raise HTTPException(status_code=401, detail="Invalid user ID or password")
-
-    expires_at = datetime.now(timezone.utc) + timedelta(days=settings.session_ttl_days)
-    session_token = await _create_user_session(db, user["user_id"], expires_at)
-    await _record_user_login(db, user["user_id"])
-    logger.info("RM login succeeded for user_id=%s", user["user_id"])
-    return {
-        "session_token": session_token,
-        "token_type": "Bearer",
-        "expires_at": expires_at.isoformat(),
-        "user": _public_user(user),
-    }
+async def auth_login(payload: RMLoginRequest, db: AsyncIOMotorDatabase = Depends(get_db), settings: AppSettings = Depends(get_settings_from_request)):
+    try: mobile = _normalize_mobile_number(payload.mobile_number)
+    except ValueError as exc: raise HTTPException(status_code=422, detail="Invalid mobile number") from exc
+    user = await db.users.find_one({"$or": [{"mobileNumber": mobile}, {"mobile_number": mobile}, {"mobile": mobile}, {"phone": mobile}, {"phone_number": mobile}], "role": {"$in": ["rm", "RM"]}})
+    if not user or _extract_user_mobile_number(user) != mobile or not _is_rm_role(user.get("role")) or not user.get("isActive", user.get("is_active", True)):
+        raise HTTPException(status_code=401, detail="Invalid mobile number")
+    expires_at = _utc_now() + timedelta(days=settings.session_ttl_days)
+    session_token = await _create_user_session(db, mobile, expires_at)
+    now = _utc_now()
+    await db.users.update_one({"_id": user.get("_id")}, {"$set": {"mobileNumber": mobile, "lastLogin": now, "updatedAt": now, "role": "rm", "isActive": True}, "$unset": {"mobile_number": "", "mobile": "", "phone": "", "phone_number": "", "contact_number": ""}})
+    return {"session_token": session_token, "token_type": "Bearer", "expires_at": _serialize_utc_datetime(expires_at), "user": _public_user(user)}
 
 
 @api_router.post("/admin/auth/login")
-async def admin_auth_login(
-    payload: LoginRequest,
-    db: AsyncIOMotorDatabase = Depends(get_db),
-    settings: AppSettings = Depends(get_settings_from_request),
-):
-    user = await db.users.find_one(
-        {"login_id_normalized": _normalize_login_id(payload.user_id)},
-        {"_id": 0},
-    )
-    if not user or not _is_admin_role(user.get("role")) or not user.get("is_active", True):
-        logger.warning("Admin login failed for user_id=%s: invalid user", payload.user_id)
+async def admin_auth_login(payload: LoginRequest, db: AsyncIOMotorDatabase = Depends(get_admin_db), settings: AppSettings = Depends(get_settings_from_request)):
+    user = await db.admin_users.find_one({"login_id_normalized": _normalize_login_id(payload.user_id)}, {"_id": 0})
+    if not user or not user.get("is_active", True) or not _verify_password(payload.password, user, settings):
         raise HTTPException(status_code=401, detail="Invalid user ID or password")
-
-    if not _verify_password(payload.password, user, settings):
-        logger.warning("Admin login failed for user_id=%s: invalid password", payload.user_id)
-        raise HTTPException(status_code=401, detail="Invalid user ID or password")
-
-    expires_at = datetime.now(timezone.utc) + timedelta(hours=settings.admin_session_ttl_hours)
+    expires_at = _utc_now() + timedelta(hours=settings.admin_session_ttl_hours)
     session_token = await _create_user_session(db, user["user_id"], expires_at)
-    await _record_user_login(db, user["user_id"])
-    logger.info("Admin login succeeded for user_id=%s", user["user_id"])
-    return {
-        "session_token": session_token,
-        "token_type": "Bearer",
-        "expires_at": expires_at.isoformat(),
-        "user": _public_user(user),
-    }
+    now = _utc_now()
+    await db.admin_users.update_one({"user_id": user["user_id"]}, {"$set": {"last_login_at": now, "updated_at": now}})
+    return {"session_token": session_token, "token_type": "Bearer", "expires_at": _serialize_utc_datetime(expires_at), "user": _public_user(user)}
 
 
 @api_router.get("/auth/me")
@@ -1415,7 +1410,7 @@ async def auth_logout(
 async def admin_auth_logout(
     request: Request,
     authorization: Optional[str] = Header(default=None),
-    db: AsyncIOMotorDatabase = Depends(get_db),
+    db: AsyncIOMotorDatabase = Depends(get_admin_db),
 ):
     return await auth_logout(request=request, authorization=authorization, db=db)
 
@@ -1590,7 +1585,7 @@ async def admin_dashboard(
 ):
     del admin_user
     total_users = await db.users.count_documents({"role": "rm"})
-    active_users = await db.users.count_documents({"role": "rm", "is_active": True})
+    active_users = await db.users.count_documents({"role": "rm", "isActive": True})
     total_products = await db.products.count_documents({"is_deleted": {"$ne": True}})
     active_products = await db.products.count_documents({"is_deleted": {"$ne": True}, "is_active": True})
     return {"metrics": {"total_rm_users": total_users, "active_rm_users": active_users, "total_products": total_products, "active_products": active_products}}
@@ -1603,183 +1598,73 @@ async def admin_meta(admin_user: Dict[str, Any] = Depends(get_current_admin_user
 
 
 @api_router.get("/admin/users")
-async def admin_list_users(
-    page: int = 1,
-    page_size: int = 10,
-    search: str = "",
-    status_filter: str = "all",
-    role_filter: str = "RM",
-    admin_user: Dict[str, Any] = Depends(get_current_admin_user),
-    db: AsyncIOMotorDatabase = Depends(get_db),
-):
+async def admin_list_users(page: int = 1, page_size: int = 10, search: str = "", status_filter: str = "all", role_filter: str = "RM", admin_user: Dict[str, Any] = Depends(get_current_admin_user), db: AsyncIOMotorDatabase = Depends(get_db)):
     del admin_user
-    page = max(page, 1)
-    page_size = min(max(page_size, 1), 100)
-    filters: Dict[str, Any] = {}
-    normalized_role = _normalize_role_label(role_filter)
-    if normalized_role in {"RM", "ADMIN"}:
-        filters["role"] = _role_for_storage(normalized_role)
-    if status_filter == "active":
-        filters["is_active"] = True
-    elif status_filter == "inactive":
-        filters["is_active"] = False
-    if search.strip():
-        filters["$or"] = [
-            {"user_id": {"$regex": search.strip(), "$options": "i"}},
-            {"name": {"$regex": search.strip(), "$options": "i"}},
-            {"email": {"$regex": search.strip(), "$options": "i"}},
-        ]
-
-    total = await db.users.count_documents(filters)
-    cursor = db.users.find(filters, {"_id": 0}).sort("created_at", -1).skip((page - 1) * page_size).limit(page_size)
-    users = [_serialize_admin_user(user) for user in await cursor.to_list(length=page_size)]
-    return {"items": users, "total": total, "page": page, "page_size": page_size}
-
+    if _normalize_role_label(role_filter) != "RM": raise HTTPException(status_code=422, detail="Only RM users can be listed here")
+    filters: Dict[str, Any] = {"role": {"$in": ["rm", "RM"]}}
+    if status_filter == "active": filters["$or"] = [{"isActive": True}, {"is_active": True}]
+    elif status_filter == "inactive": filters["$or"] = [{"isActive": False}, {"is_active": False}]
+    if search.strip(): filters["$and"] = [{"$or": [{"mobileNumber": {"$regex": search.strip(), "$options": "i"}}, {"mobile_number": {"$regex": search.strip(), "$options": "i"}}, {"name": {"$regex": search.strip(), "$options": "i"}}, {"email": {"$regex": search.strip(), "$options": "i"}}]}]
+    page = max(page, 1); page_size = min(max(page_size, 1), 100)
+    raw_users = await db.users.find(filters, {"_id": 0}).sort("createdAt", -1).to_list(length=None)
+    valid_users = []
+    for user in raw_users:
+        mobile = _extract_user_mobile_number(user)
+        if mobile is None: continue
+        user["mobileNumber"] = mobile; valid_users.append(user)
+    total = len(valid_users)
+    return {"items": [_serialize_admin_user(user) for user in valid_users[(page - 1) * page_size : page * page_size]], "total": total, "page": page, "page_size": page_size}
 
 @api_router.post("/admin/users")
-async def admin_create_user(
-    payload: AdminUserCreateRequest,
-    admin_user: Dict[str, Any] = Depends(get_current_admin_user),
-    db: AsyncIOMotorDatabase = Depends(get_db),
-    settings: AppSettings = Depends(get_settings_from_request),
-):
-    now = datetime.now(timezone.utc)
-    password = payload.password or _generate_temporary_password()
-    document = {
-        "user_id": payload.user_id.strip(),
-        "login_id_normalized": _normalize_login_id(payload.user_id),
-        "name": payload.name.strip(),
-        "email": payload.email.strip(),
-        "picture": "",
-        "role": _role_for_storage(payload.role),
-        "is_active": payload.is_active,
-        "must_change_password": payload.password is None,
-        "auth_provider": "credentials",
-        "created_at": now,
-        "updated_at": now,
-        "created_by": admin_user["user_id"],
-        "updated_by": admin_user["user_id"],
-        "last_login_at": None,
-    }
-    document.update(_create_password_record(password, settings.password_hash_iterations))
-    try:
-        await db.users.insert_one(document)
-    except DuplicateKeyError as exc:
-        raise HTTPException(status_code=409, detail="User ID already exists") from exc
-    response = {"item": _serialize_admin_user(document)}
-    if payload.password is None:
-        response["temporary_password"] = password
-    return response
+async def admin_create_user(payload: AdminUserCreateRequest, admin_user: Dict[str, Any] = Depends(get_current_admin_user), db: AsyncIOMotorDatabase = Depends(get_db)):
+    if _normalize_role_label(payload.role) != "RM": raise HTTPException(status_code=422, detail="Only RM users can be managed here")
+    try: mobile = _normalize_mobile_number(payload.mobile_number)
+    except ValueError as exc: raise HTTPException(status_code=422, detail="Invalid mobile number") from exc
+    now = _utc_now(); document = {"name": payload.name, "email": payload.email, "mobileNumber": mobile, "role": "rm", "isActive": payload.is_active, "createdAt": now, "updatedAt": now, "lastLogin": None, "createdBy": admin_user["user_id"], "updatedBy": admin_user["user_id"]}
+    try: await db.users.insert_one(document)
+    except DuplicateKeyError as exc: raise HTTPException(status_code=409, detail="Mobile number already exists") from exc
+    return {"item": _serialize_admin_user(document)}
 
-
-@api_router.put("/admin/users/{user_id}")
-async def admin_update_user(
-    user_id: str,
-    payload: AdminUserUpdateRequest,
-    admin_user: Dict[str, Any] = Depends(get_current_admin_user),
-    db: AsyncIOMotorDatabase = Depends(get_db),
-):
-    existing = await db.users.find_one({"user_id": user_id}, {"_id": 0})
-    if not existing:
-        raise HTTPException(status_code=404, detail="User not found")
-
-    update_fields: Dict[str, Any] = {"updated_at": datetime.now(timezone.utc), "updated_by": admin_user["user_id"]}
-    clear_sessions = False
-    if payload.user_id is not None:
-        update_fields["user_id"] = payload.user_id.strip()
-        update_fields["login_id_normalized"] = _normalize_login_id(payload.user_id)
-        clear_sessions = payload.user_id.strip() != user_id
-    if payload.name is not None:
-        update_fields["name"] = payload.name.strip()
-    if payload.email is not None:
-        update_fields["email"] = payload.email.strip()
-    if payload.role is not None:
-        update_fields["role"] = _role_for_storage(payload.role)
-        clear_sessions = True
-    if payload.is_active is not None:
-        update_fields["is_active"] = payload.is_active
-        if not payload.is_active:
-            clear_sessions = True
-
-    try:
-        await db.users.update_one({"user_id": user_id}, {"$set": update_fields})
-    except DuplicateKeyError as exc:
-        raise HTTPException(status_code=409, detail="User ID already exists") from exc
-
-    if clear_sessions:
-        await db.user_sessions.delete_many({"user_id": user_id})
-
-    updated = await db.users.find_one({"user_id": update_fields.get("user_id", user_id)}, {"_id": 0})
+@api_router.put("/admin/users/{mobile_number}")
+async def admin_update_user(mobile_number: str, payload: AdminUserUpdateRequest, admin_user: Dict[str, Any] = Depends(get_current_admin_user), db: AsyncIOMotorDatabase = Depends(get_db)):
+    try: old_mobile = _normalize_mobile_number(mobile_number)
+    except ValueError as exc: raise HTTPException(status_code=422, detail="Invalid mobile number") from exc
+    existing = await db.users.find_one({"$or": [{"mobileNumber": old_mobile}, {"mobile_number": old_mobile}, {"mobile": old_mobile}, {"phone": old_mobile}, {"phone_number": old_mobile}], "role": {"$in": ["rm", "RM"]}})
+    if not existing: raise HTTPException(status_code=404, detail="RM user not found")
+    fields = {"updatedAt": _utc_now(), "updatedBy": admin_user["user_id"]}
+    if payload.name is not None: fields["name"] = payload.name
+    if payload.email is not None: fields["email"] = payload.email
+    if payload.mobile_number is not None:
+        try: fields["mobileNumber"] = _normalize_mobile_number(payload.mobile_number)
+        except ValueError as exc: raise HTTPException(status_code=422, detail="Invalid mobile number") from exc
+    if payload.is_active is not None: fields["isActive"] = payload.is_active
+    if payload.role is not None and _normalize_role_label(payload.role) != "RM": raise HTTPException(status_code=422, detail="Only RM role is allowed")
+    try: await db.users.update_one({"_id": existing["_id"]}, {"$set": fields, "$unset": {"mobile_number": "", "mobile": "", "phone": "", "phone_number": "", "contact_number": "", "is_active": ""}})
+    except DuplicateKeyError as exc: raise HTTPException(status_code=409, detail="Mobile number already exists") from exc
+    updated = await db.users.find_one({"_id": existing["_id"]}, {"_id": 0})
     return {"item": _serialize_admin_user(updated)}
 
+async def _set_rm_active(mobile_number: str, active: bool, admin_user: Dict[str, Any], db: AsyncIOMotorDatabase):
+    mobile = _normalize_mobile_number(mobile_number); now = _utc_now()
+    result = await db.users.update_one({"$or": [{"mobileNumber": mobile}, {"mobile_number": mobile}, {"mobile": mobile}, {"phone": mobile}, {"phone_number": mobile}], "role": {"$in": ["rm", "RM"]}}, {"$set": {"mobileNumber": mobile, "role": "rm", "isActive": active, "updatedAt": now, "updatedBy": admin_user["user_id"]}, "$unset": {"mobile_number": "", "mobile": "", "phone": "", "phone_number": "", "contact_number": "", "is_active": ""}})
+    if not result.matched_count: raise HTTPException(status_code=404, detail="RM user not found")
+    if not active: await db.user_sessions.delete_many({"user_id": mobile})
+    return {"item": _serialize_admin_user(await db.users.find_one({"mobileNumber": mobile}, {"_id": 0}))}
 
-@api_router.post("/admin/users/{user_id}/reset-password")
-async def admin_reset_user_password(
-    user_id: str,
-    payload: AdminUserPasswordResetRequest,
-    admin_user: Dict[str, Any] = Depends(get_current_admin_user),
-    db: AsyncIOMotorDatabase = Depends(get_db),
-    settings: AppSettings = Depends(get_settings_from_request),
-):
-    existing = await db.users.find_one({"user_id": user_id}, {"_id": 0})
-    if not existing:
-        raise HTTPException(status_code=404, detail="User not found")
+@api_router.post("/admin/users/{mobile_number}/activate")
+async def admin_activate_user(mobile_number: str, admin_user: Dict[str, Any] = Depends(get_current_admin_user), db: AsyncIOMotorDatabase = Depends(get_db)):
+    return await _set_rm_active(mobile_number, True, admin_user, db)
 
-    password = payload.password or _generate_temporary_password()
-    update_fields = _create_password_record(password, settings.password_hash_iterations)
-    update_fields.update({"must_change_password": payload.password is None, "updated_at": datetime.now(timezone.utc), "updated_by": admin_user["user_id"]})
-    await db.users.update_one({"user_id": user_id}, {"$set": update_fields})
-    await db.user_sessions.delete_many({"user_id": user_id})
-    response = {"ok": True}
-    if payload.password is None:
-        response["temporary_password"] = password
-    return response
+@api_router.post("/admin/users/{mobile_number}/deactivate")
+async def admin_deactivate_user(mobile_number: str, admin_user: Dict[str, Any] = Depends(get_current_admin_user), db: AsyncIOMotorDatabase = Depends(get_db)):
+    return await _set_rm_active(mobile_number, False, admin_user, db)
 
-
-@api_router.post("/admin/users/{user_id}/activate")
-async def admin_activate_user(
-    user_id: str,
-    admin_user: Dict[str, Any] = Depends(get_current_admin_user),
-    db: AsyncIOMotorDatabase = Depends(get_db),
-):
-    update = {"is_active": True, "updated_at": datetime.now(timezone.utc), "updated_by": admin_user["user_id"]}
-    result = await db.users.update_one({"user_id": user_id}, {"$set": update})
-    if not result.matched_count:
-        raise HTTPException(status_code=404, detail="User not found")
-    current = await db.users.find_one({"user_id": user_id}, {"_id": 0})
-    return {"item": _serialize_admin_user(current)}
-
-
-@api_router.post("/admin/users/{user_id}/deactivate")
-async def admin_deactivate_user(
-    user_id: str,
-    admin_user: Dict[str, Any] = Depends(get_current_admin_user),
-    db: AsyncIOMotorDatabase = Depends(get_db),
-):
-    update = {"is_active": False, "updated_at": datetime.now(timezone.utc), "updated_by": admin_user["user_id"]}
-    result = await db.users.update_one({"user_id": user_id}, {"$set": update})
-    if not result.matched_count:
-        raise HTTPException(status_code=404, detail="User not found")
-    await db.user_sessions.delete_many({"user_id": user_id})
-    current = await db.users.find_one({"user_id": user_id}, {"_id": 0})
-    return {"item": _serialize_admin_user(current)}
-
-
-@api_router.delete("/admin/users/{user_id}")
-async def admin_delete_user(
-    user_id: str,
-    admin_user: Dict[str, Any] = Depends(get_current_admin_user),
-    db: AsyncIOMotorDatabase = Depends(get_db),
-):
-    if user_id == admin_user["user_id"]:
-        raise HTTPException(status_code=400, detail="You cannot delete your own admin account")
-    result = await db.users.delete_one({"user_id": user_id})
-    if not result.deleted_count:
-        raise HTTPException(status_code=404, detail="User not found")
-    await db.user_sessions.delete_many({"user_id": user_id})
-    return {"ok": True}
-
-
+@api_router.delete("/admin/users/{mobile_number}")
+async def admin_delete_user(mobile_number: str, admin_user: Dict[str, Any] = Depends(get_current_admin_user), db: AsyncIOMotorDatabase = Depends(get_db)):
+    del admin_user; mobile = _normalize_mobile_number(mobile_number)
+    result = await db.users.delete_one({"$or": [{"mobileNumber": mobile}, {"mobile_number": mobile}, {"mobile": mobile}, {"phone": mobile}, {"phone_number": mobile}], "role": {"$in": ["rm", "RM"]}})
+    if not result.deleted_count: raise HTTPException(status_code=404, detail="RM user not found")
+    await db.user_sessions.delete_many({"user_id": mobile}); return {"ok": True}
 @api_router.get("/admin/products")
 async def admin_list_products(
     page: int = 1,

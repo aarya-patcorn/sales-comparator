@@ -54,9 +54,9 @@ export function AppSidebar() {
 
       <hr />
 
-      <SidebarContent className="overflow-x-hidden px-2 py-3">
+      <SidebarContent className="overflow-x-hidden px-0 py-3">
         <SidebarGroup>
-          <SidebarGroupLabel className="text-sidebar-foreground/90">Workspace</SidebarGroupLabel>
+          <SidebarGroupLabel className="text-sidebar-foreground/90 ">Workspace</SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu>
               {navItems.map((item) => {
@@ -68,7 +68,7 @@ export function AppSidebar() {
                       render={<NavLink to={item.to} end={item.to === "/dashboard"} />}
                       isActive={isActive}
                       tooltip={item.label}
-                      className="h-auto min-h-14 gap-3 rounded-2xl border border-transparent px-3 py-3 transition hover:border-sidebar-border/50 hover:bg-sidebar-accent/30"
+                      className="h-auto min-h-12 gap-3 rounded-2xl border border-transparent px-3 py-3 transition hover:border-sidebar-border/50 hover:bg-sidebar-accent/30"
                     >
                       <Icon className="size-4 shrink-0" />
                       <div className="min-w-0 group-data-[collapsible=icon]:hidden">

@@ -161,39 +161,32 @@ export async function fetchUsers(
 }
 
 export async function createUser(token: string, payload: CreateUserPayload) {
-  return request<ApiItemResponse<AdminUser> & { temporary_password?: string }>(
+  return request<ApiItemResponse<AdminUser>>(
     "/admin/users",
     { method: "POST", body: JSON.stringify(payload) },
     token,
   );
 }
 
-export async function updateUser(token: string, userId: string, payload: UpdateUserPayload) {
+export async function updateUser(token: string, mobileNumber: string, payload: UpdateUserPayload) {
   return request<ApiItemResponse<AdminUser>>(
-    `/admin/users/${encodeURIComponent(userId)}`,
+    `/admin/users/${encodeURIComponent(mobileNumber)}`,
     { method: "PUT", body: JSON.stringify(payload) },
     token,
   );
 }
 
-export async function setUserActive(token: string, userId: string, active: boolean) {
+export async function setUserActive(token: string, mobileNumber: string, active: boolean) {
   return request<ApiItemResponse<AdminUser>>(
-    `/admin/users/${encodeURIComponent(userId)}/${active ? "activate" : "deactivate"}`,
+    `/admin/users/${encodeURIComponent(mobileNumber)}/${active ? "activate" : "deactivate"}`,
     { method: "POST" },
     token,
   );
 }
 
-export async function resetUserPassword(token: string, userId: string, password?: string) {
-  return request<{ ok: true; temporary_password?: string }>(
-    `/admin/users/${encodeURIComponent(userId)}/reset-password`,
-    { method: "POST", body: JSON.stringify(password ? { password } : {}) },
-    token,
-  );
-}
 
-export async function deleteUser(token: string, userId: string) {
-  return request<{ ok: true }>(`/admin/users/${encodeURIComponent(userId)}`, { method: "DELETE" }, token);
+export async function deleteUser(token: string, mobileNumber: string) {
+  return request<{ ok: true }>(`/admin/users/${encodeURIComponent(mobileNumber)}`, { method: "DELETE" }, token);
 }
 
 export async function fetchCompetitors(token: string, params: { page: number; pageSize: number; search: string; statusFilter: string }) {
